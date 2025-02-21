@@ -60,9 +60,6 @@
 
 #define MI_FULL_LISTING (1<<0)
 
-
-extern int ds_persistent_state;
-
 typedef struct _ds_dest
 {
 	str uri;        /* URI used in pinging and for matching destination at reload */
@@ -76,7 +73,7 @@ typedef struct _ds_dest
 	unsigned short running_weight;
 	unsigned short active_running_weight;
 	unsigned short priority;
-	struct socket_info *sock;
+	const struct socket_info *sock;
 	struct ip_addr ips[DS_MAX_IPS]; /* IP-Address of the entry */
 	unsigned short int ports[DS_MAX_IPS]; /* Port of the request URI */
 	unsigned short int protos[DS_MAX_IPS]; /* Protocol of the request URI */
@@ -110,6 +107,7 @@ typedef struct _ds_pvar_param
 {
 	pv_spec_t pvar;
 	int value;
+	char buf[0];
 } ds_pvar_param_t, *ds_pvar_param_p;
 
 
@@ -118,6 +116,12 @@ typedef struct _ds_partition
 	str name;              /* Partition name */
 	str table_name;        /* Table name */
 	str db_url;            /* DB url */
+	str ping_from;
+	str ping_method;
+	int persistent_state;
+
+	str ping_sock;
+	struct socket_info *ping_sock_info;
 
 	db_con_t **db_handle;
 	db_func_t dbf;
@@ -171,7 +175,7 @@ typedef struct
 typedef struct _ds_selected_dst
 {
 	str uri;
-	struct socket_info *socket;
+	const struct socket_info *socket;
 } ds_selected_dst, *ds_selected_dst_p;
 
 extern str ds_set_id_col;
@@ -187,7 +191,7 @@ extern str ds_dest_probe_mode_col;
 
 extern pv_elem_t * hash_param_model;
 extern str hash_pvar_param;
-extern str algo_route_param;
+extern struct script_route_ref *algo_route;
 
 extern str ds_setid_pvname;
 extern pv_spec_t ds_setid_pv;
@@ -211,12 +215,12 @@ extern void *ds_srg;
 int init_ds_db(ds_partition_t *partition);
 int ds_connect_db(ds_partition_t *partition);
 void ds_disconnect_db(ds_partition_t *partition);
-int ds_reload_db(ds_partition_t *partition, int initial);
+int ds_reload_db(ds_partition_t *partition, int initial, int is_inherit_state);
 
 int init_ds_data(ds_partition_t *partition);
 void ds_destroy_data(ds_partition_t *partition);
 
-int ds_update_dst(struct sip_msg *msg, str *uri, struct socket_info *sock, int mode);
+int ds_update_dst(struct sip_msg *msg, str *uri, const struct socket_info *sock, int mode);
 int ds_select_dst(struct sip_msg *msg, ds_select_ctl_p ds_select_ctl, ds_selected_dst_p selected_dst, int ds_flags);
 int ds_next_dst(struct sip_msg *msg, int mode, ds_partition_t *partition);
 int ds_set_state(int group, str *address, int state, int type,

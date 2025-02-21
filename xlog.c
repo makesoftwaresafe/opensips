@@ -49,7 +49,7 @@ int xlog_buf_size = 4096;
 int xlog_force_color = 0;
 
 /* the log level used when printing xlog messages */
-int xlog_print_level = L_ERR;
+int xlog_print_level = L_NOTICE;
 
 /* the logging level/threshold for filtering the xlog messages for printing */
 static int xlog_level_default = L_NOTICE;
@@ -445,7 +445,7 @@ int pv_get_color(struct sip_msg *msg, pv_param_t *param,
 	char* end;
 	str s;
 
-	if(log_stderr==0 && xlog_force_color==0)
+	if(xlog_force_color==0)
 	{
 		s.s = "";
 		s.len = 0;

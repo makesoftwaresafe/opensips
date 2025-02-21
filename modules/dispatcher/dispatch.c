@@ -57,7 +57,7 @@
 
 extern ds_partition_t *partitions;
 
-extern struct socket_info *probing_sock;
+extern const struct socket_info *probing_sock;
 extern event_id_t dispatch_evi_id;
 extern ds_partition_t *default_partition;
 
@@ -174,7 +174,7 @@ void ds_destroy_data(ds_partition_t *partition)
 }
 
 
-int add_dest2list(int id, str uri, struct socket_info *sock, str *comsock, int state,
+int add_dest2list(int id, str uri, const struct socket_info *sock, str *comsock, int state,
 			int weight, int prio, int probe_mode, str attrs, str description, ds_data_t *d_data)
 {
 	ds_dest_p dp = NULL;
@@ -470,7 +470,6 @@ int reindex_dests( ds_data_t *d_data)
 	for( sp=d_data->sets ; sp!= NULL ; sp=sp->next )
 	{
 		if (sp->nr == 0) {
-			dp0 = NULL;
 			continue;
 		}
 
@@ -571,8 +570,15 @@ ds_pvar_param_p ds_get_pvar_param(int id, str uri)
 	int len = ds_pattern_prefix.len + ds_pattern_infix.len + ds_pattern_suffix.len 
 				+ uri.len + str_id.len;
 
-	char buf[len]; /* XXX: check if this works for all compilers */
+	char *buf;
 	ds_pvar_param_p param;
+
+	param = shm_malloc(sizeof *param + len);
+	if (!param) {
+		LM_ERR("no more shm memory\n");
+		return NULL;
+	}
+	buf = param->buf;
 
 	if (ds_pattern_one>DS_PATTERN_NONE) {
 		name.len = 0;
@@ -597,12 +603,6 @@ ds_pvar_param_p ds_get_pvar_param(int id, str uri)
 		}
 		memcpy(name.s + name.len, ds_pattern_suffix.s, ds_pattern_suffix.len);
 		name.len += ds_pattern_suffix.len;
-	}
-
-	param = shm_malloc(sizeof(ds_pvar_param_t));
-	if (!param) {
-		LM_ERR("no more shm memory\n");
-		return NULL;
 	}
 
 	if (!pv_parse_spec(ds_pattern_one>DS_PATTERN_NONE ? &name : &ds_pattern_prefix,
@@ -772,7 +772,7 @@ int run_route_algo(struct sip_msg *msg, int rt_idx,ds_dest_p entry)
 int ds_route_algo(struct sip_msg *msg, ds_set_p set, 
 		ds_dest_p **sorted_set,	int ds_use_default)
 {
-	int i, j, k, end_idx, cnt, rt_idx, fret;
+	int i, j, k, end_idx, cnt, fret;
 	ds_dest_p *sset;
 
 	if (!set) {
@@ -780,9 +780,8 @@ int ds_route_algo(struct sip_msg *msg, ds_set_p set,
 		return -1;
 	}
 
-	if ((rt_idx = get_script_route_ID_by_name(algo_route_param.s,
-	sroutes->request, RT_NO)) == -1) {
-		LM_ERR("Invalid route parameter \n");
+	if (!ref_script_route_is_valid(algo_route)) {
+		LM_ERR("Undefined route <%s>, failing\n", algo_route->name.s);
 		return -1;
 	}
 
@@ -806,8 +805,14 @@ int ds_route_algo(struct sip_msg *msg, ds_set_p set,
 			continue;
 		}
 
-		fret = run_route_algo(msg, rt_idx, &set->dlist[i]);
+		fret = run_route_algo(msg, algo_route->idx, &set->dlist[i]);
 		set->dlist[i].route_algo_value = fret;
+
+		if (fret < 0) {
+			/* move to the end of the list */
+			sset[end_idx--] = &set->dlist[i];
+			continue;
+		}
 
 		/* search the proper position */
 		j = 0;
@@ -938,7 +943,7 @@ void ds_flusher_routine(unsigned int ticks, void* param)
 
 	ds_partition_t *partition;
 	for (partition = partitions; partition; partition = partition->next){
-		if (*partition->db_handle==NULL)
+		if (*partition->db_handle==NULL || !partition->persistent_state)
 			continue;
 
 		val_cmp[0].type = DB_INT;
@@ -1003,7 +1008,7 @@ void ds_flusher_routine(unsigned int ticks, void* param)
 
 
 /*load groups of destinations from DB*/
-static ds_data_t* ds_load_data(ds_partition_t *partition, int use_state_col)
+static ds_data_t* ds_load_data(ds_partition_t *partition)
 {
 	ds_data_t *d_data;
 	int i, id, nr_rows, cnt, nr_cols = 9;
@@ -1011,7 +1016,7 @@ static ds_data_t* ds_load_data(ds_partition_t *partition, int use_state_col)
 	int weight;
 	int prio;
 	int probe_mode;
-	struct socket_info *sock;
+	const struct socket_info *sock;
 	str uri;
 	str attrs, weight_st;
 	str description;
@@ -1025,7 +1030,7 @@ static ds_data_t* ds_load_data(ds_partition_t *partition, int use_state_col)
 			&ds_dest_prio_col, &ds_dest_description_col,
 			&ds_dest_probe_mode_col, &ds_dest_state_col};
 
-	if (!use_state_col)
+	if (!partition->persistent_state)
 		nr_cols--;
 
 	if(*partition->db_handle == NULL){
@@ -1105,7 +1110,8 @@ static ds_data_t* ds_load_data(ds_partition_t *partition, int use_state_col)
 			get_str_from_dbval("WEIGHT", values+3,
 			                   0/*not_null*/, 0/*not_empty*/, weight_st, error2);
 			if (!is_fs_url(&weight_st)) {
-				str2int(&weight_st, (unsigned int *)&weight);
+				if (str2int(&weight_st, (unsigned int *)&weight) < 0)
+					goto error;
 				memset(&weight_st, 0, sizeof weight_st);
 			}
 		}
@@ -1127,7 +1133,7 @@ static ds_data_t* ds_load_data(ds_partition_t *partition, int use_state_col)
 			probe_mode = VAL_INT(values+7);
 
 		/* state */
-		if (!use_state_col || VAL_NULL(values+8))
+		if (!partition->persistent_state || VAL_NULL(values+8))
 			/* active state */
 			state = 0;
 		else
@@ -1178,7 +1184,7 @@ error:
 }
 
 
-int ds_reload_db(ds_partition_t *partition, int initial)
+int ds_reload_db(ds_partition_t *partition, int initial, int is_inherit_state)
 {
 	ds_data_t *old_data;
 	ds_data_t *new_data;
@@ -1190,7 +1196,7 @@ int ds_reload_db(ds_partition_t *partition, int initial)
 		sr_set_status( ds_srg, STR2CI(partition->name),
 			SR_STATUS_RELOADING_DATA, CHAR_INT("data re-loading"), 0);
 
-	new_data = ds_load_data(partition, ds_persistent_state);
+	new_data = ds_load_data(partition);
 	if (new_data==NULL) {
 		LM_ERR("failed to load the new data, dropping the reload\n");
 		if (initial)
@@ -1214,7 +1220,10 @@ int ds_reload_db(ds_partition_t *partition, int initial)
 	if (old_data) {
 		/* copy the state of the destinations from the old set
 		 * (for the matching ids) */
-		ds_inherit_state( old_data, new_data);
+		if (is_inherit_state) {
+			ds_inherit_state( old_data, new_data);
+		}
+		
 		ds_destroy_data_set( old_data );
 	}
 
@@ -1595,7 +1604,7 @@ static inline int ds_get_index(int group, ds_set_p *index,
 }
 
 
-int ds_update_dst(struct sip_msg *msg, str *uri, struct socket_info *sock,
+int ds_update_dst(struct sip_msg *msg, str *uri, const struct socket_info *sock,
 																	int mode)
 {
 	uri_type utype;
@@ -1848,8 +1857,8 @@ int ds_select_dst(struct sip_msg *msg, ds_select_ctl_p ds_select_ctl,
 			ds_id = 0;
 		break;
 		case 10:
-			if (algo_route_param.s == NULL || algo_route_param.len == 0) {
-				LM_ERR("No hash_route param provided \n");
+			if (!ref_script_route_is_valid(algo_route)) {
+				LM_ERR("No algo_route param provided or not defined\n");
 				goto error;
 			}
 			if (ds_route_algo(msg, idx, &sorted_set, ds_flags&DS_USE_DEFAULT)
@@ -2097,7 +2106,7 @@ error:
 
 int ds_next_dst(struct sip_msg *msg, int mode, ds_partition_t *partition)
 {
-	struct socket_info *sock;
+	const struct socket_info *sock;
 	struct usr_avp *avp;
 	struct usr_avp *tmp_avp;
 	struct usr_avp *attr_avp;
@@ -2660,7 +2669,7 @@ void ds_check_timer(unsigned int ticks, void* param)
 		 * to free the whole structure here */
 		ds_options_callback_param_t params;
 
-		struct socket_info *sock;
+		const struct socket_info *sock;
 		struct usr_avp *avps;
 
 		struct gw_prob_pack *next;
@@ -2769,9 +2778,13 @@ void ds_check_timer(unsigned int ticks, void* param)
 
 			/* Execute the Dialog using the "request"-Method of the
 			 * TM-Module.*/
-			if (tmb.new_auto_dlg_uac(&ds_ping_from,
+			if (tmb.new_auto_dlg_uac((partition->ping_from.len?
+							&partition->ping_from:
+							&ds_ping_from),
 			&pack->params.uri, NULL, NULL,
-			pack->sock?pack->sock:probing_sock,
+			pack->sock?pack->sock:(partition->ping_sock.len?
+							partition->ping_sock_info:
+							probing_sock),
 			&dlg) != 0 ) {
 				LM_ERR("failed to create new TM dlg\n");
 					continue;
@@ -2785,14 +2798,23 @@ void ds_check_timer(unsigned int ticks, void* param)
 			dlg->avps = pack->avps;
 			pack->avps = NULL;
 
-			if (tmb.t_request_within(&ds_ping_method,
+			if (tmb.t_request_within((partition->ping_method.len?
+							&partition->ping_method:
+							&ds_ping_method),
 					NULL,
 					NULL,
 					dlg,
 					ds_options_callback,
 					(void*)pack,
-					osips_shm_free) < 0) {
-				LM_ERR("unable to execute dialog\n");
+					osips_shm_free) < 0)
+			{
+				LM_ERR("failed to send probe for <%.*s>, set %d, setting "
+					"it to probing\n",
+					pack->params.uri.len, pack->params.uri.s,
+					pack->params.set_id);
+				ds_set_state( pack->params.set_id, &pack->params.uri,
+					DS_PROBING_DST, 1, pack->params.partition, 1, 0,
+					MI_SSTR("failed to send probe"));
 				shm_free(pack);
 			}
 			tmb.free_dlg(dlg);

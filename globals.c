@@ -81,7 +81,9 @@ int enable_asserts = 0;
 /* abort process on failed assertion. disabled by default */
 int abort_on_assert = 0;
 /* start by only logging to stderr */
-int log_stdout = 0, log_stderr = 1;
+int log_stdout = 0;
+int stderr_enabled = 1;
+int syslog_enabled = 0;
 /* log facility (see syslog(3)) */
 int log_facility = LOG_DAEMON;
 /* the id to be printed in syslog */
@@ -136,7 +138,7 @@ int mcast_ttl = -1; /* if -1, don't touch it, use the default (usually 1) */
 
 int tos = IPTOS_LOWDELAY; // lgtm [cpp/short-global-name]
 
-struct socket_info* bind_address=NULL; /* pointer to the crt. proc.
+const struct socket_info* bind_address=NULL; /* pointer to the crt. proc.
 				       listening address*/
 
 /* if aliases should be automatically discovered and added
@@ -153,8 +155,12 @@ int process_no = 0;
 /* cfg parsing */
 int cfg_errors=0;
 
-/* start-up time */
-time_t startup_time = 0;
+/**
+ * @startup_time  - near to OpenSIPS launch time, see init_mi_uptime()
+ * @ready_time    - per process, denotes completion of mod_init + child_init
+ * @ready_delay   - difference between above two UNIX timestamps
+ */
+time_t startup_time, ready_time, ready_delay;
 
 /* shared memory (in MB) */
 unsigned long shm_mem_size=SHM_MEM_SIZE * 1024 * 1024;

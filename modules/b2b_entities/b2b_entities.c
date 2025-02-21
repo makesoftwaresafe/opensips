@@ -63,8 +63,8 @@ unsigned int server_hsize = 9;
 unsigned int client_hsize = 9;
 static char* script_req_route;
 static char* script_reply_route;
-int req_routeid  = -1;
-int reply_routeid = -1;
+struct script_route_ref *req_route_ref  = NULL;
+struct script_route_ref *reply_route_ref = NULL;
 str db_url;
 str b2be_cdb_url;
 str cdb_key_prefix = str_init("b2be$");
@@ -101,6 +101,7 @@ static const cmd_export_t cmds[] = {
 		{CMD_PARAM_VAR|CMD_PARAM_OPT, 0, 0},
 		{CMD_PARAM_STR|CMD_PARAM_OPT|CMD_PARAM_FIX_NULL,
 			fixup_ua_flags, fixup_free_ua_flags},
+		{CMD_PARAM_STR|CMD_PARAM_OPT, 0, 0},
 		{0,0,0}},
 		REQUEST_ROUTE},
 	{"ua_session_update", (cmd_function)b2b_ua_update, {
@@ -153,14 +154,14 @@ static const param_export_t params[]={
 /* mandatory parameters */
 #define UA_START_MI_PARAMS "ruri", "to", "from"
 #define UA_UPDATE_MI_PARAMS "key", "method"
-#define UA_REPLY_MI_PARAMS "key", "method", "code"
+#define UA_REPLY_MI_PARAMS "key", "method", "code", "reason"
 
 static const mi_export_t mi_cmds[] = {
 	{ "b2be_list", 0,0,0,{
 		{mi_b2be_list, {0}},
 		{EMPTY_MI_RECIPE}}
 	},
-	{ "ua_session_start", 0, 0, 0, {
+	{ "ua_session_client_start", 0, 0, 0, {
 		{b2b_ua_session_client_start, {UA_START_MI_PARAMS, 0}},
 		{b2b_ua_session_client_start, {UA_START_MI_PARAMS, "proxy", 0}},
 		{b2b_ua_session_client_start, {UA_START_MI_PARAMS, "body", 0}},
@@ -250,15 +251,10 @@ static const mi_export_t mi_cmds[] = {
 	},
 	{ "ua_session_reply", 0, 0, 0, {
 		{b2b_ua_mi_reply, {UA_REPLY_MI_PARAMS, 0}},
-		{b2b_ua_mi_reply, {UA_REPLY_MI_PARAMS, "reason", 0}},
 		{b2b_ua_mi_reply, {UA_REPLY_MI_PARAMS, "body", 0}},
 		{b2b_ua_mi_reply, {UA_REPLY_MI_PARAMS, "extra_headers", 0}},
-		{b2b_ua_mi_reply, {UA_REPLY_MI_PARAMS, "reason", "body", 0}},
-		{b2b_ua_mi_reply, {UA_REPLY_MI_PARAMS, "reason", "extra_headers", 0}},
 		{b2b_ua_mi_reply, {UA_REPLY_MI_PARAMS, "body", "content_type", 0}},
 		{b2b_ua_mi_reply, {UA_REPLY_MI_PARAMS, "body", "extra_headers", 0}},
-		{b2b_ua_mi_reply, {UA_REPLY_MI_PARAMS, "reason", "body", "content_type", 0}},
-		{b2b_ua_mi_reply, {UA_REPLY_MI_PARAMS, "reason", "body", "extra_headers", 0}},
 		{b2b_ua_mi_reply, {UA_REPLY_MI_PARAMS, "body", "content_type",
 			"extra_headers", 0}},
 		{EMPTY_MI_RECIPE}}
@@ -488,9 +484,9 @@ static int mod_init(void)
 
 	if (script_req_route)
 	{
-		req_routeid = get_script_route_ID_by_name( script_req_route,
-			sroutes->request, RT_NO);
-		if (req_routeid < 1)
+		req_route_ref = ref_script_route_by_name( script_req_route,
+			sroutes->request, RT_NO, REQUEST_ROUTE, 0);
+		if (!ref_script_route_is_valid(req_route_ref))
 		{
 			LM_ERR("route <%s> does not exist\n",script_req_route);
 			return -1;
@@ -499,9 +495,9 @@ static int mod_init(void)
 
 	if (script_reply_route)
 	{
-		reply_routeid = get_script_route_ID_by_name( script_reply_route,
-			sroutes->request, RT_NO);
-		if (reply_routeid < 1)
+		reply_route_ref = ref_script_route_by_name( script_reply_route,
+			sroutes->request, RT_NO, REQUEST_ROUTE, 0);
+		if (!ref_script_route_is_valid(reply_route_ref))
 		{
 			LM_ERR("route <%s> does not exist\n",script_reply_route);
 			return -1;
@@ -668,7 +664,7 @@ int b2b_restore_logic_info(enum b2b_entity_type type, str* key,
 	{
 		table = client_htable;
 	}
-	if(b2b_parse_key(key, &hash_index, &local_index, NULL) < 0)
+	if(b2b_parse_key(key, &hash_index, &local_index) < 0)
 	{
 		LM_ERR("Wrong format for b2b key [%.*s]\n", key->len, key->s);
 		return -1;
@@ -707,7 +703,7 @@ int b2b_update_b2bl_param(enum b2b_entity_type type, str* key,
 	{
 		table = client_htable;
 	}
-	if(b2b_parse_key(key, &hash_index, &local_index, NULL) < 0)
+	if(b2b_parse_key(key, &hash_index, &local_index) < 0)
 	{
 		LM_ERR("Wrong format for b2b key [%.*s]\n", key->len, key->s);
 		return -1;
@@ -756,9 +752,9 @@ str *b2b_get_b2bl_key(str* callid, str* from_tag, str* to_tag, str* entity_key)
 	}
 	/* check if the to tag has the b2b key format
 	 * -> meaning that it is a server request */
-	if(b2b_parse_key(to_tag, &hash_index, &local_index, NULL)>=0)
+	if(b2b_parse_key(to_tag, &hash_index, &local_index)>=0)
 		table = server_htable;
-	else if (b2b_parse_key(callid, &hash_index, &local_index, NULL)>=0)
+	else if (b2b_parse_key(callid, &hash_index, &local_index)>=0)
 		table = client_htable;
 	else
 		return NULL; /* to tag and/or callid are not part of this B2B */

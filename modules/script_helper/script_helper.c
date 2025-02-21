@@ -40,7 +40,7 @@
 static int use_dialog;
 static int create_dialog_flags;
 static char *seq_route;
-static int seq_route_id;
+static struct script_route_ref *seq_route_ref;
 
 struct tm_binds tm_api;
 struct dlg_binds dlg_api;
@@ -110,9 +110,9 @@ int mod_init(void)
 	LM_DBG("initializing module...\n");
 
 	if (seq_route) {
-		seq_route_id = get_script_route_ID_by_name(seq_route,
-			sroutes->request, RT_NO);
-		if (seq_route_id == -1)
+		seq_route_ref = ref_script_route_by_name(seq_route,
+			sroutes->request, RT_NO, REQUEST_ROUTE, 0);
+		if (!ref_script_route_is_valid(seq_route_ref))
 			LM_ERR("route \"%s\" does not exist! ignoring\n", seq_route);
 	}
 
@@ -182,9 +182,9 @@ int run_helper_logic(struct sip_msg *msg, void *param)
 				       msg->callid->body.len, msg->callid->body.s);
 
 			if (msg->REQ_METHOD == METHOD_ACK) {
-				rc = tm_api.t_check_trans(msg, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL);
+				rc = tm_api.t_check_trans(msg);
 				if (rc > 0)
-					tm_api.t_relay(msg, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL);
+					tm_api.t_relay(msg, NULL, NULL);
 
 				return SCB_RUN_POST_CBS;
 			}
@@ -197,14 +197,14 @@ int run_helper_logic(struct sip_msg *msg, void *param)
 	if (msg->REQ_METHOD == METHOD_CANCEL) {
 		seq_request = 1;
 
-		rc = tm_api.t_check_trans(msg, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL);
+		rc = tm_api.t_check_trans(msg);
 		if (rc > 0)
-			tm_api.t_relay(msg, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL);
+			tm_api.t_relay(msg, NULL, NULL);
 
 		return SCB_RUN_POST_CBS;
 	}
 
-	if (tm_api.t_check_trans(msg, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL) == 0)
+	if (tm_api.t_check_trans(msg) == 0)
 		return SCB_RUN_POST_CBS;
 
 	/**
@@ -213,16 +213,16 @@ int run_helper_logic(struct sip_msg *msg, void *param)
 	 * - relay them and do not trigger the request route at all
 	 */
 	if (seq_request) {
-		if (seq_route_id > 0) {
+		if ( ref_script_route_is_valid(seq_route_ref)) {
 			LM_DBG("running seq route '%s'\n", seq_route);
-			if (run_top_route(sroutes->request[seq_route_id], msg) & ACT_FL_DROP) {
+			if (run_top_route(sroutes->request[seq_route_ref->idx], msg) & ACT_FL_DROP) {
 				LM_DBG("script exited in the seq route\n");
 
 				return SCB_RUN_POST_CBS;
 			}
 		}
 
-		if (tm_api.t_relay(msg, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL) < 0)
+		if (tm_api.t_relay(msg, NULL, NULL) < 0)
 			sl_api.reply(msg, 500, &status_500, NULL);
 
 		return SCB_RUN_POST_CBS;

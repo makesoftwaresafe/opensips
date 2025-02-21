@@ -118,12 +118,12 @@ static inline str_list *new_str(char *s, int len, str_list **last, int *total)
 
 
 static inline char *get_hfblock( str *uri, struct hdr_field *hf, int *l,
-											struct socket_info** send_sock)
+											const struct socket_info** send_sock)
 {
 	str_list sl, *last, *new, *i, *foo;
 	int hf_avail, frag_len, total_len;
 	char *begin, *needle, *dst, *ret, *d;
-	str *sock_name, *portname;
+	const str *sock_name, *portname;
 	union sockaddr_union to_su;
 
 	ret=0; /* pessimist: assume failure */
@@ -374,7 +374,7 @@ static mi_response_t *mi_tm_uac_dlg(const mi_params_t *params, str *nexthop,
 	static dlg_t dlg;
 	struct sip_uri pruri;
 	struct sip_uri pnexthop;
-	struct socket_info* sock;
+	const struct socket_info* sock;
 	str method;
 	str ruri;
 	str hdrs;
@@ -691,17 +691,31 @@ mi_response_t *mi_tm_reply(const mi_params_t *params, str *new_hdrs, str *body)
 
 	tmp = trans_id;
 	p = memchr( tmp.s, ':', tmp.len);
-	if ( p==NULL)
-		return init_mi_error(400, MI_SSTR("Invalid trans_id"));
+	if ( p ) {
+		/* old fashion ID hash:label, decimal */
+		tmp.len = p-tmp.s;
+		if( str2int( &tmp, &hash_index)!=0 )
+			return init_mi_error(400,MI_SSTR("Invalid index in old trans_id"));
 
-	tmp.len = p-tmp.s;
-	if( str2int( &tmp, &hash_index)!=0 )
-		return init_mi_error(400, MI_SSTR("Invalid index in trans_id"));
+		tmp.s = p+1;
+		tmp.len = (trans_id.s+trans_id.len) - tmp.s;
+		if( str2int( &tmp, &hash_label)!=0 )
+			return init_mi_error(400,MI_SSTR("Invalid label in old trans_id"));
+	} else {
+		p = memchr( tmp.s, '.', tmp.len);
+		if ( p==NULL)
+			return init_mi_error(400, MI_SSTR("Invalid trans_id"));
+		/* new format ID label.hash, reversed hexa */
+		tmp.len = p-tmp.s;
+		if( reverse_hex2int( tmp.s, tmp.len, &hash_label)!=0 )
+			return init_mi_error(400, MI_SSTR("Invalid label in trans_id"));
 
-	tmp.s = p+1;
-	tmp.len = (trans_id.s+trans_id.len) - tmp.s;
-	if( str2int( &tmp, &hash_label)!=0 )
-		return init_mi_error(400, MI_SSTR("Invalid label in trans_id"));
+		tmp.s = p+1;
+		tmp.len = (trans_id.s+trans_id.len) - tmp.s;
+		if( reverse_hex2int( tmp.s, tmp.len, &hash_index)!=0 )
+			return init_mi_error(400,MI_SSTR("Invalid label in old trans_id"));
+	}
+
 
 	if( t_lookup_ident( &trans, hash_index, hash_label)<0 )
 		return init_mi_error(404, MI_SSTR("Transaction not found"));

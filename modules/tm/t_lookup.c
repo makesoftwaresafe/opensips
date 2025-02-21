@@ -320,7 +320,8 @@ static int matching_3261( struct sip_msg *p_msg, struct cell **trans,
 		p_cell; p_cell = p_cell->next_cell )
 	{
 		t_msg=p_cell->uas.request;
-		if (!t_msg) continue;  /* don't try matching UAC transactions */
+		/* don't try matching UAC transactions */
+		if (is_local(p_cell) || !t_msg) continue;
 		if (skip_method & t_msg->REQ_METHOD) continue;
 
 		/* here we do an exercise which will be removed from future code
@@ -941,8 +942,18 @@ int init_rb( struct retr_buf *rb, struct sip_msg *msg)
 {
 	int proto;
 
-	update_sock_struct_from_ip( &rb->dst.to, msg );
 	proto=msg->rcv.proto;
+
+	if (msg->msg_flags&FL_REPLY_TO_VIA) {
+		if (update_sock_struct_from_via( &(rb->dst.to), msg, msg->via1 )==-1) {
+			LM_ERR("cannot lookup reply dst: %.*s\n",
+					msg->via1->host.len, msg->via1->host.s );
+			ser_error=E_BAD_VIA;
+			return 0;
+		}
+	} else {
+		update_sock_struct_from_ip( &rb->dst.to, msg );
+	}
 	rb->dst.proto=proto;
 	rb->dst.proto_reserved1=msg->rcv.proto_reserved1;
 	/* use for sending replies the incoming interface of the request -bogdan */

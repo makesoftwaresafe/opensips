@@ -88,14 +88,14 @@ extern int is_tcp_main;
 /* module  tracing parameters */
 static int trace_is_on_tmp=0, *trace_is_on;
 static char* trace_filter_route;
-static int trace_filter_route_id = -1;
+static struct script_route_ref *trace_filter_route_ref = NULL;
 /**/
 
 static int mod_init(void);
 static int proto_ws_init(struct proto_info *pi);
 static int proto_ws_init_listener(struct socket_info *si);
-static int proto_ws_send(struct socket_info* send_sock,
-		char* buf, unsigned int len, union sockaddr_union* to,
+static int proto_ws_send(const struct socket_info* send_sock,
+		char* buf, unsigned int len, const union sockaddr_union* to,
 		unsigned int id);
 static int ws_read_req(struct tcp_connection* con, int* bytes_read);
 static int ws_conn_init(struct tcp_connection* c);
@@ -186,10 +186,10 @@ static int proto_ws_init(struct proto_info *pi)
 	pi->tran.dst_attr		= tcp_conn_fcntl;
 
 	pi->net.flags			= PROTO_NET_USE_TCP;
-	pi->net.read			= (proto_net_read_f)ws_read_req;
+	pi->net.stream.read		= ws_read_req;
 
-	pi->net.conn_init		= ws_conn_init;
-	pi->net.conn_clean		= ws_conn_clean;
+	pi->net.stream.conn.init	= ws_conn_init;
+	pi->net.stream.conn.clean	= ws_conn_clean;
 	pi->net.report			= ws_report;
 
 	return 0;
@@ -230,9 +230,9 @@ static int mod_init(void)
 
 	*trace_is_on = trace_is_on_tmp;
 	if ( trace_filter_route ) {
-		trace_filter_route_id =
-			get_script_route_ID_by_name( trace_filter_route, 
-				sroutes->request, RT_NO);
+		trace_filter_route_ref =
+			ref_script_route_by_name( trace_filter_route, 
+				sroutes->request, RT_NO, REQUEST_ROUTE, 0);
 	}
 
 	return 0;
@@ -256,7 +256,7 @@ static int ws_conn_init(struct tcp_connection* c)
 		d->dest = t_dst;
 		d->net_trace_proto_id = net_trace_proto_id;
 		d->trace_is_on = trace_is_on;
-		d->trace_route_id = trace_filter_route_id;
+		d->trace_route_ref = trace_filter_route_ref;
 	}
 
 	d->state = WS_CON_INIT;
@@ -327,8 +327,8 @@ static void ws_report(int type, unsigned long long conn_id, int conn_flags,
 
 
 /*! \brief Finds a tcpconn & sends on it */
-static int proto_ws_send(struct socket_info* send_sock,
-		char* buf, unsigned int len, union sockaddr_union* to,
+static int proto_ws_send(const struct socket_info* send_sock,
+		char* buf, unsigned int len, const union sockaddr_union* to,
 		unsigned int id)
 {
 	struct tcp_connection *c;
@@ -428,8 +428,8 @@ send_it:
 
 	/* mark the ID of the used connection (tracing purposes) */
 	last_outgoing_tcp_id = c->id;
-	send_sock->last_local_real_port = c->rcv.dst_port;
-	send_sock->last_remote_real_port = c->rcv.src_port;
+	send_sock->last_real_ports->local = c->rcv.dst_port;
+	send_sock->last_real_ports->remote = c->rcv.src_port;
 
 	tcp_conn_release(c, 0);
 	return n;

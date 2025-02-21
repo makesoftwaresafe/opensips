@@ -52,8 +52,8 @@
 static int mod_init(void);
 static int proto_tcp_init(struct proto_info *pi);
 static int proto_tcp_init_listener(struct socket_info *si);
-static int proto_tcp_send(struct socket_info* send_sock,
-		char* buf, unsigned int len, union sockaddr_union* to,
+static int proto_tcp_send(const struct socket_info* send_sock,
+		char* buf, unsigned int len, const union sockaddr_union* to,
 		unsigned int id);
 inline static int _tcp_write_on_socket(struct tcp_connection *c, int fd,
 		char *buf, int len);
@@ -85,7 +85,7 @@ trace_proto_t tprot;
 /* module  tracing parameters */
 static int trace_is_on_tmp=0, *trace_is_on;
 static char* trace_filter_route;
-static int trace_filter_route_id = -1;
+static struct script_route_ref* trace_filter_route_ref = NULL;
 /**/
 
 extern int unix_tcp_sock;
@@ -207,8 +207,8 @@ static int proto_tcp_init(struct proto_info *pi)
 	pi->tran.dst_attr		= tcp_conn_fcntl;
 
 	pi->net.flags			= PROTO_NET_USE_TCP;
-	pi->net.read			= (proto_net_read_f)tcp_read_req;
-	pi->net.write			= (proto_net_write_f)tcp_async_write;
+	pi->net.stream.read		= tcp_read_req;
+	pi->net.stream.write		= tcp_async_write;
 	pi->net.report			= tcp_report;
 
 	if (tcp_async && !tcp_has_async_write()) {
@@ -223,7 +223,7 @@ static int proto_tcp_init(struct proto_info *pi)
 		 * if the tcp_async is enbled */
 		if (tcp_async_max_postponed_chunks<=1)
 			tcp_async_max_postponed_chunks = 2;
-		pi->net.async_chunks= tcp_async_max_postponed_chunks;
+		pi->net.stream.async_chunks= tcp_async_max_postponed_chunks;
 	}
 
 	return 0;
@@ -261,9 +261,9 @@ static int mod_init(void)
 
 	*trace_is_on = trace_is_on_tmp;
 	if ( trace_filter_route ) {
-		trace_filter_route_id =
-			get_script_route_ID_by_name( trace_filter_route, sroutes->request,
-				RT_NO);
+		trace_filter_route_ref =
+			ref_script_route_by_name( trace_filter_route,
+				sroutes->request, RT_NO, REQUEST_ROUTE, 0 );
 	}
 
 	return 0;
@@ -360,9 +360,9 @@ inline static int _tcp_write_on_socket(struct tcp_connection *c, int fd,
 
 
 /*! \brief Finds a tcpconn & sends on it */
-static int proto_tcp_send(struct socket_info* send_sock,
+static int proto_tcp_send(const struct socket_info* send_sock,
 									char* buf, unsigned int len,
-									union sockaddr_union* to, unsigned int id)
+									const union sockaddr_union* to, unsigned int id)
 {
 	struct tcp_connection *c;
 	struct tcp_conn_profile prof;
@@ -429,7 +429,7 @@ static int proto_tcp_send(struct socket_info* send_sock,
 
 				/* trace the message */
 				if ( TRACE_ON( c->flags ) &&
-						check_trace_route( trace_filter_route_id, c) ) {
+						check_trace_route( trace_filter_route_ref, c) ) {
 					if ( tcpconn2su( c, &src_su, &dst_su) < 0 ) {
 						LM_ERR("can't create su structures for tracing!\n");
 					} else {
@@ -442,8 +442,8 @@ static int proto_tcp_send(struct socket_info* send_sock,
 
 				/* mark the ID of the used connection (tracing purposes) */
 				last_outgoing_tcp_id = c->id;
-				send_sock->last_local_real_port = c->rcv.dst_port;
-				send_sock->last_remote_real_port = c->rcv.src_port;
+				send_sock->last_real_ports->local = c->rcv.dst_port;
+				send_sock->last_real_ports->remote = c->rcv.src_port;
 
 				/* connect is still in progress, break the sending
 				 * flow now (the actual write will be done when
@@ -459,7 +459,7 @@ static int proto_tcp_send(struct socket_info* send_sock,
 			/* our first connect attempt succeeded - go ahead as normal */
 			/* trace the attempt */
 			if (  TRACE_ON( c->flags ) &&
-					check_trace_route( trace_filter_route_id, c) ) {
+					check_trace_route( trace_filter_route_ref, c) ) {
 				c->proto_flags |= F_TCP_CONN_TRACED;
 				if ( tcpconn2su( c, &src_su, &dst_su) < 0 ) {
 					LM_ERR("can't create su structures for tracing!\n");
@@ -477,7 +477,7 @@ static int proto_tcp_send(struct socket_info* send_sock,
 			}
 
 			if ( TRACE_ON( c->flags ) &&
-					check_trace_route( trace_filter_route_id, c) ) {
+					check_trace_route( trace_filter_route_ref, c) ) {
 				c->proto_flags |= F_TCP_CONN_TRACED;
 				if ( tcpconn2su( c, &src_su, &dst_su) < 0 ) {
 					LM_ERR("can't create su structures for tracing!\n");
@@ -532,8 +532,8 @@ static int proto_tcp_send(struct socket_info* send_sock,
 
 			/* mark the ID of the used connection (tracing purposes) */
 			last_outgoing_tcp_id = c->id;
-			send_sock->last_local_real_port = c->rcv.dst_port;
-			send_sock->last_remote_real_port = c->rcv.src_port;
+			send_sock->last_real_ports->local = c->rcv.dst_port;
+			send_sock->last_real_ports->remote = c->rcv.src_port;
 
 			/* we successfully added our write chunk - success */
 			sh_log(c->hist, TCP_SEND2MAIN, "send 3, (%d)", c->refcnt);
@@ -581,8 +581,8 @@ send_it:
 
 	/* mark the ID of the used connection (tracing purposes) */
 	last_outgoing_tcp_id = c->id;
-	send_sock->last_local_real_port = c->rcv.dst_port;
-	send_sock->last_remote_real_port = c->rcv.src_port;
+	send_sock->last_real_ports->local = c->rcv.dst_port;
+	send_sock->last_real_ports->remote = c->rcv.src_port;
 
 	sh_log(c->hist, TCP_SEND2MAIN, "send 6, (%d, async: %d)", c->refcnt, n < len);
 	tcp_conn_release(c, (n<len)?1:0/*pending data in async mode?*/ );
@@ -647,7 +647,7 @@ again:
  */
 static int tcp_read_req(struct tcp_connection* con, int* bytes_read)
 {
-	int bytes;
+	int bytes, rc;
 	int total_bytes;
 	struct tcp_req* req;
 
@@ -661,7 +661,7 @@ static int tcp_read_req(struct tcp_connection* con, int* bytes_read)
 			ip_addr2a( &con->rcv.dst_ip ), con->rcv.dst_port );
 
 		if ( TRACE_ON( con->flags ) &&
-					check_trace_route( trace_filter_route_id, con) ) {
+					check_trace_route( trace_filter_route_ref, con) ) {
 			if ( tcpconn2su( con, &src_su, &dst_su) < 0 ) {
 				LM_ERR("can't create su structures for tracing!\n");
 			} else {
@@ -677,9 +677,9 @@ static int tcp_read_req(struct tcp_connection* con, int* bytes_read)
 
 	if (con->con_req) {
 		req=con->con_req;
-		LM_DBG("Using the per connection buff \n");
+		LM_DBG("Using the per connection buff for conn %p\n",con);
 	} else {
-		LM_DBG("Using the global ( per process ) buff \n");
+		LM_DBG("Using the global ( per process ) buff for conn %p\n",con);
 		init_tcp_req(&tcp_current_req, 0);
 		req=&tcp_current_req;
 	}
@@ -735,18 +735,19 @@ again:
 	int max_chunks = tcp_attr_isset(con, TCP_ATTR_MAX_MSG_CHUNKS) ?
 			con->profile.attrs[TCP_ATTR_MAX_MSG_CHUNKS] : tcp_max_msg_chunks;
 
-	switch (tcp_handle_req(req,con,max_chunks,parallel_handling)){
+	switch ((rc = tcp_handle_req(req,con,max_chunks,parallel_handling))){
 		case 1:
 			goto again;
 		case -1:
 			goto error;
 	}
 
-	LM_DBG("tcp_read_req end\n");
+	LM_DBG("tcp_read_req end for conn %p, req is %p\n",con,con->con_req);
 done:
 	if (bytes_read) *bytes_read=total_bytes;
-	/* connection will be released */
-	return 0;
+
+	return rc == 2   ?  1  /* connection is already released! */
+	       /* 0,1? */:  0; /* connection will be released */
 error:
 	/* connection will be released as ERROR */
 	return -1;

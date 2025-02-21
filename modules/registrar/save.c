@@ -156,7 +156,7 @@ static inline int no_contacts(udomain_t* _d, struct save_ctx *_sctx,
 static int set_sock_hdr(struct sip_msg *msg, ucontact_info_t *ci,
                         unsigned int reg_flags)
 {
-	struct socket_info *sock;
+	const struct socket_info *sock;
 	struct hdr_field *hf;
 	str socks;
 	str hosts;
@@ -613,8 +613,8 @@ static inline int add_contacts(struct sip_msg* _m, contact_t* _c,
  * Process REGISTER request and save it's contacts
  */
 #define is_cflag_set(_name) ((sctx.flags)&(_name))
-int save_aux(struct sip_msg* _m, str* forced_binding, void* _d, str* flags_s,
-				str* uri, str* _owtag)
+int save_aux(struct sip_msg* _m, str* forced_binding, void* _d,
+	struct save_flags *flags, str* uri, str* _owtag)
 {
 	struct save_ctx  sctx;
 	contact_t* c;
@@ -628,8 +628,13 @@ int save_aux(struct sip_msg* _m, str* forced_binding, void* _d, str* flags_s,
 	sctx.min_expires = min_expires;
 	sctx.max_expires = max_expires;
 	sctx.max_contacts = max_contacts;
-	if ( flags_s )
-		reg_parse_save_flags( flags_s, &sctx);
+	if (flags) {
+		sctx.flags = flags->flags;
+		sctx.max_contacts = flags->max_contacts;
+		sctx.min_expires = flags->min_expires;
+		sctx.max_expires = flags->max_expires;
+		sctx.cmatch = flags->cmatch;
+	}
 
 	if (route_type == ONREPLY_ROUTE)
 		sctx.flags |= REG_SAVE_NOREPLY_FLAG;
@@ -717,7 +722,7 @@ return_minus_one:
 }
 
 #define MAX_FORCED_BINDING_LEN 256
-int save(struct sip_msg* _m, void* _d, str* _f, str* _s, str* _owtag)
+int save(struct sip_msg* _m, void* _d, void* _f, str* _s, str* _owtag)
 {
 	struct sip_msg* msg = _m;
 	struct cell* t = NULL;
@@ -906,11 +911,12 @@ done:
  * @contact_gp:      contact URI to be deleted
  * @next_hop_gp:     IP/domain in front of contacts to be deleted
  * @sip_instance_gp: delete contacts with given "+sip_instance"
+ * @bflag:           delete contacts which the specific branch flag mask
  *
  * @return:      1 on success, negative on failure
  */
 int _remove(struct sip_msg *msg, void *udomain, str *aor_uri, str *match_ct,
-            str *match_next_hop, str *match_sin)
+            str *match_next_hop, str *match_sin, int* bflag)
 {
 	struct hostent delete_nh_he, *he;
 	urecord_t *record;
@@ -934,7 +940,7 @@ int _remove(struct sip_msg *msg, void *udomain, str *aor_uri, str *match_ct,
 	}
 
 	/* without any additional filtering, delete the whole urecord entry */
-	if (!match_ct && !match_next_hop && !match_sin) {
+	if (!match_ct && !match_next_hop && !match_sin && (!bflag ||!*bflag)) {
 		if (ul.delete_urecord((udomain_t *)udomain, &aor_user, record, 0) != 0) {
 			LM_ERR("failed to delete urecord for aor '%.*s'\n",
 			        aor_user.len, aor_user.s);
@@ -1010,6 +1016,11 @@ int _remove(struct sip_msg *msg, void *udomain, str *aor_uri, str *match_ct,
 
 		if (match_sin) {
 			if (str_strcmp(match_sin, &contact->instance))
+				continue;
+		}
+
+		if (bflag && *bflag) {
+			if ((contact->cflags & *(bflag)) == 0)
 				continue;
 		}
 

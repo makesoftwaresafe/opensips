@@ -1,5 +1,5 @@
 #
-# Copyright (C) 2020-2022 OpenSIPS Solutions
+# Copyright (C) 2020-2024 OpenSIPS Solutions
 #
 # This file is part of opensips, a free SIP server.
 #
@@ -17,9 +17,9 @@
 # along with this program; if not, write to the Free Software
 # Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA
 
-DROP PROCEDURE IF EXISTS `OSIPS_TB_COPY_3_2_TO_3_3`;
+DROP PROCEDURE IF EXISTS `OSIPS_TB_COPY_3_5_TO_3_6`;
 DELIMITER $$
-CREATE PROCEDURE `OSIPS_TB_COPY_3_2_TO_3_3`(
+CREATE PROCEDURE `OSIPS_TB_COPY_3_5_TO_3_6`(
 	IN old_db CHAR(64), IN new_db CHAR(64), IN tb_name CHAR(64))
 BEGIN
 SET @c1 = (SELECT EXISTS(
@@ -33,27 +33,14 @@ SET @c2 = (SELECT EXISTS(
        AND table_name = tb_name
 ));
 IF @c1 = 1 AND @c2 = 1 THEN
-	IF tb_name = 'cc_agents' THEN
+	IF tb_name = 'subscriber' THEN
 		SET @Q = CONCAT('INSERT INTO ', new_db, '.', tb_name, '
-			(id, agentid, location, logstate, msrp_location,
-				msrp_max_sessions, skills, wrapup_end_time, wrapup_time)
+			(id, username, domain, password,
+				ha1, ha1_sha256, ha1_sha512t256)
 			SELECT
-			id, agentid, location, logstate, NULL,
-				4, skills, wrapup_end_time, wrapup_time
+			id, username, domain, password,
+				ha1, ha1_sha256, ha1_sha512t256
 			FROM ', old_db, '.', tb_name);
-	ELSEIF tb_name = 'cc_calls' THEN
-		SET @Q = CONCAT('INSERT INTO ', new_db, '.', tb_name, '
-			(id, state, media, ig_cback, no_rej, setup_time, eta,
-				last_start, recv_time, caller_dn, caller_un,
-				b2buaid, flow, agent, script_param)
-			SELECT
-			id, state, 0, ig_cback, no_rej, setup_time, eta,
-				last_start, recv_time, caller_dn, caller_un,
-				b2buaid, flow, agent, script_param
-			FROM ', old_db, '.', tb_name);
-	ELSEIF tb_name = 'cc_cdrs' THEN
-		SET @Q = CONCAT('INSERT INTO ', new_db, '.', tb_name,
-			' SELECT *, 0 FROM ', old_db, '.', tb_name);
 	ELSE
 		SET @Q = CONCAT('INSERT INTO ', new_db, '.', tb_name,
 			' SELECT * FROM ', old_db, '.', tb_name);

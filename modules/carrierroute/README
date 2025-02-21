@@ -952,7 +952,7 @@ route {
         # choose route domain 0 of the default carrier
 
         if(!cr_route("default", "0", "$rU", "$rU", "call_id", "crc32")){
-                sl_send_reply("403", "Not allowed");
+                sl_send_reply(403, "Not allowed");
         } else {
                 # In case of failure, re-route the request
                 t_on_failure("1");
@@ -966,7 +966,7 @@ failure_route[1] {
         if (t_check_status("408|5[0-9][0-9]")) {
                 #choose route domain 1 of the default carrier
         if(!cr_route("default", "1", "$rU", "$rU", "call_id", "crc32")){
-                        t_reply("403", "Not allowed");
+                        t_reply(403, "Not allowed");
                 } else {
                         t_on_failure("2");
                         t_relay();
@@ -1220,20 +1220,20 @@ Chapter 2. Contributors
    Table 2.1. Top contributors by DevScore^(1), authored
    commits^(2) and lines added/removed^(3)
      Name DevScore Commits Lines ++ Lines --
-   1. Henning Westerholt (@henningw) 124 80 2085 1607
-   2. Jonas Appel 52 1 6240 0
+   1. Henning Westerholt (@henningw) 125 80 2085 1607
+   2. Jonas Appel 54 1 6240 0
    3. Hardy Kahl 49 3 2713 1360
    4. Bogdan-Andrei Iancu (@bogdan-iancu) 29 24 131 154
    5. Razvan Crainea (@razvancrainea) 23 20 109 108
    6. Vlad Patrascu (@rvlad-patrascu) 22 5 384 764
-   7. Liviu Chircu (@liviuchircu) 17 11 132 206
+   7. Liviu Chircu (@liviuchircu) 19 13 134 210
    8. Daniel-Constantin Mierla (@miconda) 9 7 34 30
-   9. Maksym Sobolyev (@sobomax) 4 2 5 5
-   10. Carsten Bock 3 1 64 15
+   9. Alexandra Titoc 5 3 13 2
+   10. Maksym Sobolyev (@sobomax) 4 2 5 5
 
-   All remaining contributors: Bob Atkins, Julián Moreno Patiño,
-   Ovidiu Sas (@ovidiusas), Sergio Gutierrez, Iouri Kharon,
-   UnixDev, Zero King (@l2dy), ihsinme, Peter Lemenkov
+   All remaining contributors: Carsten Bock, Bob Atkins, Julián
+   Moreno Patiño, Ovidiu Sas (@ovidiusas), Sergio Gutierrez, Iouri
+   Kharon, UnixDev, Zero King (@l2dy), ihsinme, Peter Lemenkov
    (@lemenkov), Walter Doekes (@wdoekes), Edson Gellert Schubert.
 
    (1) DevScore = author_commits + author_lines_added /
@@ -1256,21 +1256,22 @@ Chapter 2. Contributors
 
    Table 2.2. Most recently active contributors^(1) to this module
                       Name                   Commit Activity
-   1.  Maksym Sobolyev (@sobomax)          Oct 2022 - Feb 2023
-   2.  ihsinme                             Feb 2022 - Feb 2022
-   3.  Razvan Crainea (@razvancrainea)     Jun 2011 - Jan 2021
-   4.  Zero King (@l2dy)                   Mar 2020 - Mar 2020
-   5.  Vlad Patrascu (@rvlad-patrascu)     May 2017 - Jul 2019
-   6.  Liviu Chircu (@liviuchircu)         Mar 2014 - Apr 2019
-   7.  Bogdan-Andrei Iancu (@bogdan-iancu) Dec 2007 - Apr 2019
-   8.  Peter Lemenkov (@lemenkov)          Jun 2018 - Jun 2018
-   9.  Julián Moreno Patiño                Feb 2016 - Feb 2016
-   10. Walter Doekes (@wdoekes)            May 2014 - May 2014
+   1.  Alexandra Titoc                     Sep 2024 - Sep 2024
+   2.  Liviu Chircu (@liviuchircu)         Mar 2014 - May 2024
+   3.  Maksym Sobolyev (@sobomax)          Oct 2022 - Feb 2023
+   4.  ihsinme                             Feb 2022 - Feb 2022
+   5.  Razvan Crainea (@razvancrainea)     Jun 2011 - Jan 2021
+   6.  Zero King (@l2dy)                   Mar 2020 - Mar 2020
+   7.  Vlad Patrascu (@rvlad-patrascu)     May 2017 - Jul 2019
+   8.  Bogdan-Andrei Iancu (@bogdan-iancu) Dec 2007 - Apr 2019
+   9.  Peter Lemenkov (@lemenkov)          Jun 2018 - Jun 2018
+   10. Julián Moreno Patiño                Feb 2016 - Feb 2016
 
-   All remaining contributors: Ovidiu Sas (@ovidiusas), UnixDev,
-   Henning Westerholt (@henningw), Sergio Gutierrez, Iouri Kharon,
-   Hardy Kahl, Daniel-Constantin Mierla (@miconda), Edson Gellert
-   Schubert, Bob Atkins, Carsten Bock, Jonas Appel.
+   All remaining contributors: Walter Doekes (@wdoekes), Ovidiu
+   Sas (@ovidiusas), UnixDev, Henning Westerholt (@henningw),
+   Sergio Gutierrez, Iouri Kharon, Hardy Kahl, Daniel-Constantin
+   Mierla (@miconda), Edson Gellert Schubert, Bob Atkins, Carsten
+   Bock, Jonas Appel.
 
    (1) including any documentation-related commits, excluding
    merge commits

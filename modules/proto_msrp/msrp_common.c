@@ -30,13 +30,14 @@
 #include "../../ut.h"
 #include "../../net/trans_trace.h"
 #include "../../net/tcp_common.h"
+#include "../../timer.h"
 #include "msrp_handler.h"
 #include "msrp_plain.h"
 #include "msrp_common.h"
 #include "msrp_tls.h"
 
 int *msrp_trace_is_on;
-int  msrp_trace_filter_route_id = -1;
+struct script_route_ref *msrp_trace_filter_route = NULL;
 trace_dest msrp_t_dst;
 
 struct msrp_req msrp_current_req;
@@ -354,7 +355,7 @@ static int msrp_handle_req(struct msrp_req *req,
 		if (req != &msrp_current_req) {
 			/* if we no longer need this tcp_req
 			 * we can free it now */
-			pkg_free(req);
+			shm_free(req);
 			con->con_req = NULL;
 		}
 	} else {
@@ -375,7 +376,7 @@ static int msrp_handle_req(struct msrp_req *req,
 			/* let's duplicate this - most likely another conn will come in */
 
 			LM_DBG("We didn't manage to read a full request\n");
-			con_req = pkg_malloc(sizeof(struct msrp_req));
+			con_req = shm_malloc(sizeof(struct msrp_req));
 			if (con_req == NULL) {
 				LM_ERR("No more mem for dynamic con request buffer\n");
 				goto error;
@@ -463,7 +464,7 @@ int msrp_read_req(struct tcp_connection* con, int* bytes_read)
 			ip_addr2a( &con->rcv.dst_ip ), con->rcv.dst_port );
 
 		if ( TRACE_ON( con->flags ) &&
-					check_trace_route( msrp_trace_filter_route_id, con) ) {
+					check_trace_route( msrp_trace_filter_route, con) ) {
 			if ( tcpconn2su( con, &src_su, &dst_su) < 0 ) {
 				LM_ERR("can't create su structures for tracing!\n");
 			} else {
@@ -555,9 +556,9 @@ error:
 /**************  SEND related functions ***************/
 
 /*! \brief Finds a tcpconn & sends on it */
-int proto_msrp_send(struct socket_info* send_sock,
+int proto_msrp_send(const struct socket_info* send_sock,
 		char* buf, unsigned int len,
-		union sockaddr_union* to, unsigned int id)
+		const union sockaddr_union* to, unsigned int id)
 {
 	struct tcp_connection *c;
 	struct tcp_conn_profile prof;
@@ -613,7 +614,7 @@ int proto_msrp_send(struct socket_info* send_sock,
 		}
 
 		if ( TRACE_ON( c->flags ) &&
-				check_trace_route( msrp_trace_filter_route_id, c) ) {
+				check_trace_route( msrp_trace_filter_route, c) ) {
 			c->proto_flags |= F_TCP_CONN_TRACED;
 			if ( tcpconn2su( c, &src_su, &dst_su) < 0 ) {
 				LM_ERR("can't create su structures for tracing!\n");
@@ -689,8 +690,8 @@ send_it:
 
 	/* mark the ID of the used connection (tracing purposes) */
 	last_outgoing_tcp_id = c->id;
-	send_sock->last_local_real_port = c->rcv.dst_port;
-	send_sock->last_remote_real_port = c->rcv.src_port;
+	send_sock->last_real_ports->local = c->rcv.dst_port;
+	send_sock->last_real_ports->remote = c->rcv.src_port;
 
 	tcp_conn_release(c, 0);
 	return n;

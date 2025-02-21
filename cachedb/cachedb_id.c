@@ -40,6 +40,8 @@
  */
 static int dupl_string(char** dst, const char* begin, const char* end)
 {
+	str old, new;
+
 	if (*dst) pkg_free(*dst);
 
 	*dst = pkg_malloc(end - begin + 1);
@@ -48,8 +50,12 @@ static int dupl_string(char** dst, const char* begin, const char* end)
 		return -1;
 	}
 
-	memcpy(*dst, begin, end - begin);
-	(*dst)[end - begin] = '\0';
+	old.s = (char*)begin;
+	old.len = end - begin;
+	new.s = *dst;
+	un_escape(&old, &new );
+
+	new.s[new.len] = '\0';
 	return 0;
 }
 
@@ -83,7 +89,7 @@ static int parse_cachedb_url(struct cachedb_id* id, const str* url)
 
 	enum state st;
 	unsigned int len, i, ipv6_flag=0, multi_hosts=0;
-	char* begin;
+	char* begin, *last_at, *last_slash, *last_qm;
 	char* prev_token,*start_host=NULL,*start_prev=NULL,*ptr;
 
 	prev_token = 0;
@@ -105,6 +111,16 @@ static int parse_cachedb_url(struct cachedb_id* id, const str* url)
 
 	if (dupl_string(&id->initial_url,url->s,url->s+url->len) < 0)
 		goto err;
+
+	last_slash = q_memrchr(url->s, '/', url->len);
+	last_qm = q_memrchr(url->s, '?', url->len);
+
+	/* ignore any '@' characters inside the "params" part */
+	if (last_qm || last_slash)
+		last_at = q_memrchr(url->s, '@',
+		        last_slash ? (last_slash-url->s) : (last_qm-url->s));
+	else
+		last_at = q_memrchr(url->s, '@', url->len);
 
 	for(i = 0; i < len; i++) {
 		switch(st) {
@@ -159,6 +175,9 @@ static int parse_cachedb_url(struct cachedb_id* id, const str* url)
 		case ST_USER_HOST:
 			switch(url->s[i]) {
 			case '@':
+				if (&url->s[i] < last_at)
+					break;
+
 				st = ST_HOST;
 				multi_hosts = 0;
 				if (dupl_string(&id->username, begin, url->s + i) < 0) goto err;
@@ -195,6 +214,9 @@ static int parse_cachedb_url(struct cachedb_id* id, const str* url)
 		case ST_PASS_PORT:
 			switch(url->s[i]) {
 			case '@':
+				if (&url->s[i] < last_at)
+					break;
+
 				st = ST_HOST;
 				id->username = prev_token;
 				if (dupl_string(&id->password, begin, url->s + i) < 0) goto err;
