@@ -63,6 +63,7 @@ static inline int dlg_match_mode_str_to_int(const str *in)
 
 struct _dlg_cseq{
 	struct dlg_cell *dlg;
+	int dst_leg;
 	str cseq;
 };
 
@@ -211,6 +212,6 @@ static inline void get_totag(struct sip_msg *msg, str *tag)
 	}
 }
 
-int test_and_set_dlg_flag(struct dlg_cell *dlg, unsigned long index,
-		unsigned long value);
+int test_and_set_dlg_flag(struct dlg_cell *dlg, unsigned int mask,
+		unsigned int value);
 #endif

@@ -24,6 +24,7 @@
 #include "../../lib/list.h"
 #include "../../locking.h"
 #include "../../str.h"
+#include "../../route.h"
 
 #include "rtp_relay.h"
 
@@ -116,6 +117,7 @@ struct rtp_relay_ctx {
 	int ref;
 	str callid;
 	int last_branch;
+	unsigned dlg_id, dlg_entry;
 	str dlg_callid, from_tag, to_tag;
 	str flags, delete;
 	gen_lock_t lock;
@@ -157,6 +159,7 @@ mi_response_t *mi_rtp_relay_update_callid(const mi_params_t *params,
 								struct mi_handler *async_hdl);
 
 str *rtp_relay_get_sdp(struct rtp_relay_session *sess, int type);
+int rtp_relay_get_dlg_ids(str *callid, unsigned int *h_entry, unsigned int *h_id);
 
 #define RTP_RELAY_CTX_LOCK(_c) lock_get(&_c->lock);
 #define RTP_RELAY_CTX_UNLOCK(_c) lock_release(&_c->lock);
@@ -178,5 +181,31 @@ str *rtp_relay_get_sdp(struct rtp_relay_session *sess, int type);
 		RTP_RELAY_CTX_REF_UNSAFE(_c, -1); \
 		RTP_RELAY_CTX_UNLOCK(_c); \
 	} while (0);
+
+extern char *rtp_relay_route_offer_name;
+extern char *rtp_relay_route_answer_name;
+extern char *rtp_relay_route_delete_name;
+extern char *rtp_relay_route_copy_offer_name;
+extern char *rtp_relay_route_copy_answer_name;
+extern char *rtp_relay_route_copy_delete_name;
+
+int rtp_relay_route_offer(struct rtp_relay_session *sess,
+		struct rtp_relay_server *server, str *body,
+		str *ip, str *type, str *in_iface, str *out_iface,
+		str *global_flags, str *flags, str *extra_flags);
+int rtp_relay_route_answer(struct rtp_relay_session *sess,
+		struct rtp_relay_server *server, str *body,
+		str *ip, str *type, str *in_iface, str *out_iface,
+		str *global_flags, str *flags, str *extra_flags);
+int rtp_relay_route_delete(struct rtp_relay_session *sess,
+		struct rtp_relay_server *server, str *flags, str *extra);
+int rtp_relay_route_copy_offer(struct rtp_relay_session *sess,
+		struct rtp_relay_server *server, void **_ctx, str *flags,
+		unsigned int copy_flags, unsigned int streams, str *body,
+		struct rtp_relay_streams *ret_streams);
+int rtp_relay_route_copy_answer(struct rtp_relay_session *sess,
+		struct rtp_relay_server *server, void *_ctx, str *flags, str *body);
+int rtp_relay_route_copy_delete(struct rtp_relay_session *sess,
+		struct rtp_relay_server *server, void *_ctx, str *flags);
 
 #endif /* _RTP_RELAY_CTX_H_ */

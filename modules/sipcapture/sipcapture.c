@@ -421,13 +421,13 @@ static char payload_buf[MAX_PAYLOAD];
 
 
 
-#define VALUES_STR "(%ld,%lld,'%.*s','%.*s','%.*s','%.*s','%.*s','%.*s'," \
+#define VALUES_STR "(%lld,%lld,'%.*s','%.*s','%.*s','%.*s','%.*s','%.*s'," \
 					"'%.*s','%.*s','%.*s','%.*s','%.*s','%.*s','%.*s','%.*s','%.*s'," \
 					"'%.*s','%.*s','%.*s','%.*s','%.*s','%.*s',%d,'%.*s',%d," \
 					"'%.*s',%d,'%.*s',%d,%d,%d,'%.*s',%d,'%.*s','%.*s','%.*s'," \
 					"'%.*s', '%.*s', '%.*s', '%.*s', '%.*s', '%.*s')"
 
-#define RTCP_VALUES_STR "(%ld, %lld, '%.*s', '%.*s', %d, '%.*s', %d," \
+#define RTCP_VALUES_STR "(%lld, %lld, '%.*s', '%.*s', %d, '%.*s', %d," \
 						"%d, %d, %d, '%.*s', '%.*s')"
 
 int  max_async_queries=5;
@@ -446,10 +446,8 @@ int bpf_on = 0;
 char* hep_route=0;
 str hep_route_s;
 
-#define HEP_NO_ROUTE -1
-#define HEP_SIP_ROUTE 0
-static char* hep_route_name=NULL;
-static int hep_route_id=HEP_SIP_ROUTE;
+static char* hep_route_name="sip";
+static struct script_route_ref *hep_route_ref=NULL;
 
 str raw_socket_listen = { 0, 0 };
 str raw_interface = { 0, 0 };
@@ -656,9 +654,9 @@ static const dep_export_t deps = {
  * pseudo-variables
  */
 static const pv_export_t mod_items[] = {
-	{{"hep_net", sizeof("hep_net")-1}, 1201, pv_get_hep_net, 0,
+	{str_const_init("hep_net"), 1201, pv_get_hep_net, 0,
 		pv_parse_hep_net_name, 0, 0, 0},
-	{{"HEPVERSION", sizeof("HEPVERSION")-1}, 1202, pv_get_hep_version, 0,
+	{str_const_init("HEPVERSION"), 1202, pv_get_hep_version, 0,
 		0, 0, 0, 0},
 	{{0, 0}, 0, 0, 0, 0, 0, 0, 0}
 };
@@ -716,14 +714,15 @@ static int parse_hep_route(char *val)
 
 	if ( route_name.len == hep_no_route.len &&
 			strncasecmp(route_name.s, hep_no_route.s, hep_no_route.len ) == 0) {
-		hep_route_id = HEP_NO_ROUTE;
+		hep_route_ref = NULL;
 	} else if ( route_name.len == hep_sip_route.len &&
 			strncasecmp(route_name.s, hep_sip_route.s, hep_sip_route.len ) == 0) {
-		hep_route_id = HEP_SIP_ROUTE;
+		hep_route_ref = ref_script_route_by_name( "0",
+			sroutes->request, RT_NO, REQUEST_ROUTE, 0);
 	} else {
-		hep_route_id=get_script_route_ID_by_name( route_name.s,
-			sroutes->request, RT_NO);
-		if ( hep_route_id == -1 ) {
+		hep_route_ref = ref_script_route_by_name( route_name.s,
+			sroutes->request, RT_NO, REQUEST_ROUTE, 0);
+		if ( !ref_script_route_is_valid(hep_route_ref) ) {
 			LM_ERR("route <%s> not defined!\n", route_name.s);
 			return -1;
 		}
@@ -775,11 +774,9 @@ static int mod_init(void) {
 			return -1;
 		}
 
-		if (hep_route_name != NULL) {
-			if ( parse_hep_route(hep_route_name) < 0 ) {
-				LM_ERR("bad hep route name %s\n", hep_route_name);
-				return -1;
-			}
+		if ( parse_hep_route(hep_route_name) < 0 ) {
+			LM_ERR("bad hep route name %s\n", hep_route_name);
+			return -1;
 		}
 
 		set_rtcp_keys();
@@ -787,7 +784,7 @@ static int mod_init(void) {
 		/* db_url is mandatory if sip_capture is used */
 		if (((is_script_func_used("sip_capture", -1) ||
 				is_script_async_func_used("sip_capture", -1)) ||
-				hep_route_id == HEP_NO_ROUTE) ||
+				hep_route_ref == NULL) ||
 			(is_script_func_used("report_capture", -1) ||
 				is_script_async_func_used("report_capture", -1))) {
 			init_db_url(db_url, 0);
@@ -1061,7 +1058,7 @@ static int cfg_validate(void)
 		/* db_url is mandatory if sip_capture is used */
 		if (((is_script_func_used("sip_capture", -1) ||
 				is_script_async_func_used("sip_capture", -1)) ||
-				hep_route_id == HEP_NO_ROUTE) ||
+				hep_route_ref == NULL) ||
 			(is_script_func_used("report_capture", -1) ||
 				is_script_async_func_used("report_capture", -1)))
 		{
@@ -2394,7 +2391,7 @@ int hep_msg_received(void)
 		return 0;
 	}
 
-	if ( hep_route_id == HEP_NO_ROUTE ) {
+	if ( hep_route_ref == NULL ) {
 		memset(&msg, 0, sizeof(struct sip_msg));
 
 		switch (h->version) {
@@ -2438,7 +2435,8 @@ int hep_msg_received(void)
 
 		/* don't go through the main route */
 		return HEP_SCRIPT_SKIP;
-	} else if (hep_route_id > HEP_SIP_ROUTE) {
+	} else if (ref_script_route_is_valid(hep_route_ref) &&
+	hep_route_ref->idx > 0 /*default req route*/) {
 
 		/* builds a dummy message */
 		p_msg = get_dummy_sip_msg();
@@ -2451,7 +2449,7 @@ int hep_msg_received(void)
 		set_route_type( REQUEST_ROUTE );
 
 		/* run given hep route */
-		run_top_route( sroutes->request[hep_route_id], p_msg);
+		run_top_route( sroutes->request[hep_route_ref->idx], p_msg);
 
 		/* free possible loaded avps */
 		reset_avps();
@@ -2793,7 +2791,7 @@ static inline int append_sc_values(char* buf, int max_len, db_val_t* db_vals)
 	int len;
 
 	len = snprintf(buf, max_len, VALUES_STR,
-			VAL_TIME(db_vals+1), VAL_BIGINT(db_vals+2),
+			(long long)VAL_TIME(db_vals+1), VAL_BIGINT(db_vals+2),
 			VAL_STR(db_vals+3).len, VAL_STR(db_vals+3).s,
 			VAL_STR(db_vals+4).len, VAL_STR(db_vals+4).s,
 			VAL_STR(db_vals+5).len, VAL_STR(db_vals+5).s,
@@ -4252,7 +4250,7 @@ static int w_hep_relay(struct sip_msg *msg)
 	struct proxy_l* proxy;
 	struct sip_uri uri;
 
-	struct socket_info* send_sock;
+	const struct socket_info* send_sock;
 
 	union sockaddr_union to;
 
@@ -4297,6 +4295,12 @@ static int w_hep_relay(struct sip_msg *msg)
 			return -1;
 		}
 		hep_proto = PROTO_HEP_TCP;
+	} else if (uri.proto == PROTO_TLS) {
+		if (hep_version == 1 || hep_version == 2) {
+			LM_ERR("TLS not supported for HEPv%d\n", hep_version);
+			return -1;
+		}
+		hep_proto = PROTO_HEP_TLS;
 	} else {
 		LM_ERR("cannot send hep with proto %s\n",
 					proto2str(uri.proto, proto_buf));
@@ -4492,7 +4496,7 @@ static inline int append_rc_values(char* buf, int max_len, db_val_t* db_vals)
 	int len;
 
 	len = snprintf(buf, max_len, RTCP_VALUES_STR,
-			VAL_TIME(db_vals+0), VAL_BIGINT(db_vals+1),
+			(long long)VAL_TIME(db_vals+0), VAL_BIGINT(db_vals+1),
 			VAL_STR(db_vals+2).len, VAL_STR(db_vals+2).s,
 			VAL_STR(db_vals+3).len, VAL_STR(db_vals+3).s,
 			VAL_INT(db_vals+4),

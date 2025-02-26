@@ -47,6 +47,7 @@
 #include "challenge.h"
 #include "rpid.h"
 #include "api.h"
+#include "qop.h"
 #include "../../parser/digest/digest_parser.h"
 #include "../../lib/digest_auth/dauth_calc.h"
 #include "../../lib/digest_auth/dauth_nonce.h"
@@ -229,6 +230,13 @@ static int mod_init(void)
 		/* Otherwise use the parameter's value */
 		ncp->secret.s = sec_param;
 		ncp->secret.len = strlen(sec_param);
+
+		if (ncp->secret.len != AUTH_SECRET_LEN) {
+			LM_ERR("bad secret length, must be exactly 32 bytes"
+				" (256-bit AES key), given: %d (changed in OpenSIPS 3.2+)\n",
+				ncp->secret.len);
+			return -1;
+		}
 	}
 
 	if (dauth_noncer_init(ncp) < 0) {
@@ -440,7 +448,7 @@ static inline int pv_authorize(struct sip_msg* msg, str *domain,
 	if (domain->len==0)
 		domain->s = 0;
 
-	ret = pre_auth(msg, domain, hftype, &h);
+	ret = pre_auth(msg, domain, hftype, &h, 0);
 
 	if (ret != DO_AUTHORIZATION)
 		return ret;

@@ -62,7 +62,8 @@
 /** parameters */
 static str pvar_algo_param = str_init("");
 str hash_pvar_param = {NULL, 0};
-str algo_route_param = {NULL, 0};
+static str algo_route_param = {NULL, 0};
+struct script_route_ref *algo_route = NULL;
 
 pv_elem_t * hash_param_model = NULL;
 
@@ -76,6 +77,7 @@ static int ds_ping_interval = 0;
 int ds_ping_maxfwd = -1;
 int ds_probing_mode = 0;
 int ds_persistent_state = 1;
+static int ds_persistent_state_enable = 0;
 int_list_t *ds_probing_list = NULL;
 
 /* db partiton info */
@@ -93,6 +95,13 @@ typedef struct _ds_db_head
 	str attrs_avp;
 	str script_attrs_avp;
 
+	str ping_from;
+	str ping_method;
+	str persistent_state;
+
+	str ping_sock;
+	struct socket_info *ping_sock_info;
+
 	struct _ds_db_head *next;
 } ds_db_head_t;
 
@@ -102,13 +111,20 @@ ds_db_head_t default_db_head = {
 	{NULL, -1},
 	{NULL, -1},
 
+	{NULL, -1},
+	{NULL, -1},
+	{NULL, -1},
+	{NULL, -1},
+	{NULL, -1},
+	{NULL, -1},
 
 	{NULL, -1},
 	{NULL, -1},
+	{"1", 1},
+
 	{NULL, -1},
-	{NULL, -1},
-	{NULL, -1},
-	{NULL, -1},
+	NULL,
+
 	NULL
 };
 ds_db_head_t *ds_db_heads = NULL;
@@ -152,7 +168,7 @@ static str options_reply_codes_str= {0, 0};
 static int* options_reply_codes = NULL;
 static int options_codes_no;
 static str probing_sock_s;
-struct socket_info *probing_sock = NULL;
+const struct socket_info *probing_sock = NULL;
 
 ds_partition_t *partitions = NULL, *default_partition = NULL;
 
@@ -348,7 +364,9 @@ static const mi_export_t mi_cmds[] = {
 	},
 	{ "ds_reload", 0, 0, mi_child_init, {
 		{ds_mi_reload, {0}},
+		{ds_mi_reload, {"inherit_state", 0}},
 		{ds_mi_reload_1, {"partition", 0}},
+		{ds_mi_reload_1, {"partition", "inherit_state", 0}},
 		{EMPTY_MI_RECIPE}}
 	},
 	{ "ds_push_script_attrs", 0, 0, 0, {
@@ -405,6 +423,10 @@ DEF_GETTER_FUNC(cnt_avp);
 DEF_GETTER_FUNC(sock_avp);
 DEF_GETTER_FUNC(attrs_avp);
 DEF_GETTER_FUNC(script_attrs_avp);
+DEF_GETTER_FUNC(ping_from);
+DEF_GETTER_FUNC(ping_method);
+DEF_GETTER_FUNC(persistent_state);
+DEF_GETTER_FUNC(ping_sock);
 
 static partition_specific_param_t partition_params[] = {
 	{str_init("db_url"), {NULL, 0}, GETTER_FUNC(db_url)},
@@ -415,6 +437,10 @@ static partition_specific_param_t partition_params[] = {
 	PARTITION_SPECIFIC_PARAM (sock_avp, "$avp(ds_sock_failover)"),
 	PARTITION_SPECIFIC_PARAM (attrs_avp, ""),
 	PARTITION_SPECIFIC_PARAM (script_attrs_avp, ""),
+	PARTITION_SPECIFIC_PARAM (ping_from, ""),
+	PARTITION_SPECIFIC_PARAM (ping_method, ""),
+	PARTITION_SPECIFIC_PARAM (persistent_state, "1"),
+	PARTITION_SPECIFIC_PARAM (ping_sock, ""),
 };
 
 static const unsigned int partition_param_count = sizeof (partition_params) /
@@ -465,7 +491,7 @@ static int split_partition_argument(str *arg, str *partition_name)
 	arg->len -= partition_name->len + 1;
 
 	trim(partition_name);
-	for (;arg->s[0] == ' ' && arg->len; ++arg->s, --arg->len);
+	for (;(arg->s[0] == ' ' || arg->s[0] == '\n')  && arg->len; ++arg->s, --arg->len);
 	return 0;
 }
 
@@ -606,6 +632,7 @@ static int set_partition_arguments(unsigned int type, void *val)
 			}
 		}
 
+		raw_line.len -= end_pair_pos + 1 - raw_line.s;
 		raw_line.s = end_pair_pos + 1;
 		end_pair_pos = q_memchr(raw_line.s, end_pair_delim, raw_line.len);
 		eq_pos = q_memchr(raw_line.s, eq_val_delim, raw_line.len);
@@ -732,6 +759,40 @@ static int partition_init(ds_db_head_t *db_head, ds_partition_t *partition)
 		partition->script_attrs_avp_type = 0;
 	}
 
+	if (db_head->ping_from.s && db_head->ping_from.len > 0) {
+		if (pkg_str_dup(&partition->ping_from, &db_head->ping_from) < 0)
+			LM_ERR("cannot duplicate ping_from\n");
+	}
+	if (db_head->ping_method.s && db_head->ping_method.len > 0) {
+		if (pkg_str_dup(&partition->ping_method, &db_head->ping_method) < 0)
+			LM_ERR("cannot duplicate ping_method\n");
+	}
+
+	if (db_head->ping_sock.s && db_head->ping_sock.len > 0) {
+		if (pkg_str_dup(&partition->ping_sock, &db_head->ping_sock) < 0) {
+			LM_ERR("cannot duplicate ping_sock\n");
+			return -1;
+		}
+		partition->ping_sock_info = (struct socket_info *)parse_sock_info(&partition->ping_sock);
+		if (partition->ping_sock_info==NULL) {
+			LM_ERR("socket <%.*s> is not local to opensips (we must listen "
+				"on it\n", partition->ping_sock.len, partition->ping_sock.s);
+			return -1;
+		}
+	}
+
+	partition->persistent_state = ds_persistent_state;
+    if (str_strcmp(&db_head->persistent_state, const_str("0")) == 0 ||
+        str_strcmp(&db_head->persistent_state, const_str("no")) == 0 ||
+        str_strcmp(&db_head->persistent_state, const_str("off")) == 0)
+		partition->persistent_state = 0;
+    else if (str_strcmp(&db_head->persistent_state, const_str("1")) == 0 ||
+        str_strcmp(&db_head->persistent_state, const_str("yes")) == 0 ||
+        str_strcmp(&db_head->persistent_state, const_str("on")) == 0)
+		partition->persistent_state = 1;
+
+	if (partition->persistent_state)
+		ds_persistent_state_enable = 1;
 	return 0;
 }
 
@@ -867,8 +928,13 @@ static int mod_init(void)
 	pvar_algo_param.len = strlen(pvar_algo_param.s);
 	if (pvar_algo_param.len)
 		ds_pvar_parse_pattern(pvar_algo_param);
-	if (algo_route_param.s)
-		algo_route_param.len = strlen(algo_route_param.s);
+	if (algo_route_param.s) {
+		algo_route = ref_script_route_by_name( algo_route_param.s,
+			sroutes->request, RT_NO, REQUEST_ROUTE, 0);
+		if (!ref_script_route_is_valid(algo_route))
+			LM_WARN("algorithm route <%s> not found, ignoring this for now\n",
+				algo_route_param.s);
+	}
 
 	if (init_ds_bls()!=0) {
 		LM_ERR("failed to init DS blacklists\n");
@@ -908,7 +974,7 @@ static int mod_init(void)
 		}
 
 		/* do the actual data load */
-		if (ds_reload_db(partition, 1)!=0) {
+		if (ds_reload_db(partition, 1, 1)!=0) {
 			LM_ERR("failed to load data from DB\n");
 			return -1;
 		}
@@ -979,17 +1045,18 @@ next_part:
 			return -1;
 		}
 
-		/* Register the weight-recalculation timer */
-		if (fetch_freeswitch_stats &&
-		    register_timer("ds-update-weights", ds_update_weights, NULL,
-		            fs_api.stats_update_interval, TIMER_FLAG_SKIP_ON_DELAY)<0) {
-			LM_ERR("failed to register timer for weight recalc!\n");
-			return -1;
-		}
+	}
+
+	/* Register the weight-recalculation timer */
+	if (fetch_freeswitch_stats &&
+	    register_timer("ds-update-weights", ds_update_weights, NULL,
+	            fs_api.stats_update_interval, TIMER_FLAG_SKIP_ON_DELAY)<0) {
+		LM_ERR("failed to register timer for weight recalc!\n");
+		return -1;
 	}
 
 	/* register timer to flush the state of destination back to DB */
-	if (ds_persistent_state && register_timer("ds-flusher", ds_flusher_routine,
+	if (ds_persistent_state_enable && register_timer("ds-flusher", ds_flusher_routine,
 			NULL, 30 , TIMER_FLAG_SKIP_ON_DELAY)<0) {
 		LM_ERR("failed to register timer for DB flushing!\n");
 		return -1;
@@ -1061,10 +1128,10 @@ static void destroy(void)
 	LM_DBG("destroying module ...\n");
 
 	/* flush the state of the destinations */
-	if (ds_persistent_state) {
+	if (ds_persistent_state_enable) {
 		/* open the DB conns*/
 		for (part_it = partitions; part_it; part_it = part_it->next) {
-			if (part_it->db_url.s)
+			if (part_it->db_url.s && part_it->persistent_state)
 				if (ds_connect_db(part_it) != 0) {
 					LM_ERR("failed to do DB connect\n");
 				}
@@ -1371,9 +1438,12 @@ mi_response_t *ds_mi_reload(const mi_params_t *params,
 								struct mi_handler *async_hdl)
 {
 	ds_partition_t *part_it;
+	int is_inherit_state = get_mi_bool_like_param(params, "inherit_state", 1);
+
+	LM_DBG("is_inherit_state is: %d \n", is_inherit_state);
 
 	for (part_it = partitions; part_it; part_it = part_it->next)
-		if (ds_reload_db(part_it, 0)<0)
+		if (ds_reload_db(part_it, 0, is_inherit_state)<0)
 			return init_mi_error(500, MI_SSTR(MI_ERR_RELOAD));
 
 	if (ds_cluster_id && ds_cluster_sync() < 0)
@@ -1387,15 +1457,18 @@ mi_response_t *ds_mi_reload_1(const mi_params_t *params,
 {
 	ds_partition_t *partition;
 	str partname;
+	int is_inherit_state = get_mi_bool_like_param(params, "inherit_state", 1);
 
 	if (get_mi_string_param(params, "partition", &partname.s, &partname.len) < 0)
-		return init_mi_param_error();
+        return init_mi_param_error();
+
+	LM_DBG("is_inherit_state is: %d \n", is_inherit_state);
 
 	partition = find_partition_by_name(&partname);
 
 	if (partition == NULL)
 		return init_mi_error(500, MI_SSTR(MI_UNK_PARTITION));
-	if (ds_reload_db(partition, 0) < 0)
+	if (ds_reload_db(partition, 0, is_inherit_state) < 0)
 		return init_mi_error(500, MI_SSTR(MI_ERR_RELOAD));
 	
 	if (ds_cluster_id && ds_cluster_sync() < 0)

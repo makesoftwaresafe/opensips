@@ -281,6 +281,12 @@ void free_ebr_subscription( ebr_subscription *sub)
 {
 	ebr_filter *h, *n;
 
+	/* if a notification triggering a script route,
+	 * free the script route ref too */
+	if ( (sub->flags & (EBR_SUBS_TYPE_NOTY|EBR_DATA_TYPE_ROUT))
+	== (EBR_SUBS_TYPE_NOTY|EBR_DATA_TYPE_ROUT) && sub->data)
+		shm_free(sub->data);
+
 	h = sub->filters;
 	while(h) {
 		n = h->next;
@@ -469,9 +475,8 @@ int notify_ebr_subscriptions( ebr_event *ev, evi_params_t *params)
 
 	/* check the EBR subscription on this event and apply the filters */
 	sub_prev = NULL;
-	sub_next = NULL;
-	for ( sub=ev->subs ; sub ; sub_prev=sub,
-								sub=sub_next?sub_next:(sub?sub->next:NULL) ) {
+	for ( sub=ev->subs ; sub ; sub_prev=sub, sub=sub_next) {
+		sub_next = sub->next;
 
 		/* discard expired subscriptions */
 		if (sub->expire<my_time) {
@@ -501,8 +506,7 @@ int notify_ebr_subscriptions( ebr_event *ev, evi_params_t *params)
 					continue; /* keep it and try next time */
 				}
 			}
-			/* remove the subscription */
-			sub_next = sub->next;
+
 			/* unlink it */
 			if (sub_prev) sub_prev->next = sub_next;
 			else ev->subs = sub_next;
@@ -515,7 +519,6 @@ int notify_ebr_subscriptions( ebr_event *ev, evi_params_t *params)
 
 		/* run the filters */
 		matches = 1;
-		sub_next = NULL;
 		for ( filter=sub->filters ; matches && filter ; filter=filter->next ) {
 
 			/* look for the evi param with the same name */
@@ -564,6 +567,11 @@ int notify_ebr_subscriptions( ebr_event *ev, evi_params_t *params)
 			job->tm = sub->tm;
 
 			if (sub->flags&EBR_SUBS_TYPE_NOTY) {
+				/* if notification with script route, duplicate
+				 * the script reference for this noitifcation */
+				if (sub->flags&EBR_DATA_TYPE_ROUT)
+					job->data = dup_ref_script_route_in_shm
+						((struct script_route_ref *)job->data, 1);
 				/* dispatch the event notification via IPC to the right 
 				 * process. Key question - which one is the "right" process ?
 				 *   - the current processs
@@ -571,6 +579,7 @@ int notify_ebr_subscriptions( ebr_event *ev, evi_params_t *params)
 				 * Let's give it to ourselves for the moment */
 				if (ipc_send_job( process_no, ebr_ipc_type , (void*)job)<0) {
 					LM_ERR("failed to send job via IPC, skipping...\n");
+					if (job->data) shm_free(job->data);
 					shm_free(job);
 				}
 			} else {
@@ -580,9 +589,7 @@ int notify_ebr_subscriptions( ebr_event *ev, evi_params_t *params)
 					LM_ERR("failed to send job via IPC, skipping...\n");
 					shm_free(job);
 				}
-				/* remove the subscription, as it can be triggered only 
-				 * one time */
-				sub_next = sub->next;
+
 				/* unlink it */
 				if (sub_prev) sub_prev->next = sub_next;
 				else ev->subs = sub_next;
@@ -636,9 +643,8 @@ void ebr_timeout(unsigned int ticks, void* param)
 
 		/* check the EBR subscriptions on this event */
 		sub_prev = NULL;
-		sub_next = NULL;
-		for ( sub=ev->subs ; sub ; sub_prev=sub,
-								sub=sub_next?sub_next:(sub?sub->next:NULL) ) {
+		for ( sub=ev->subs ; sub ; sub_prev=sub, sub=sub_next ) {
+			sub_next = sub->next;
 
 			/* skip valid and non WAIT subscriptions */
 			if ( (sub->flags&EBR_SUBS_TYPE_WAIT)==0 || sub->expire>my_time )
@@ -670,8 +676,6 @@ void ebr_timeout(unsigned int ticks, void* param)
 				continue; /* with the next subscription */
 			}
 
-			/* remove the subscription */
-			sub_next = sub->next;
 			/* unlink it */
 			if (sub_prev) sub_prev->next = sub_next;
 			else ev->subs = sub_next;
@@ -700,6 +704,12 @@ void handle_ebr_ipc(int sender, void *payload)
 
 		/* this is a job for notifiying on an event */
 
+		if (job->flags & EBR_DATA_TYPE_ROUT &&
+		!ref_script_route_check_and_update( (struct script_route_ref *)job->data )) {
+			LM_ERR("notify route [%s] does not exist anymore\n",
+				((struct script_route_ref *)job->data)->name.s);
+			goto cleanup;
+		}
 		/* prepare a fake/dummy request */
 		req = get_dummy_sip_msg();
 		if(req == NULL) {
@@ -720,7 +730,7 @@ void handle_ebr_ipc(int sender, void *payload)
 		} else {
 			/* run the notification route */
 			set_route_type( REQUEST_ROUTE );
-			run_top_route( sroutes->request[(int)(long)job->data], req);
+			run_top_route( sroutes->request[((struct script_route_ref *)job->data)->idx], req);
 		}
 
 		if (ebr_tmb.t_set_remote_t)
@@ -732,6 +742,8 @@ void handle_ebr_ipc(int sender, void *payload)
 
 		cleanup:
 		/* destroy everything */
+		if (job->flags & EBR_DATA_TYPE_ROUT)
+			shm_free(job->data);
 		destroy_avp_list( &job->avps );
 		shm_free(job);
 

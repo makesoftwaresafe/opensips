@@ -114,7 +114,7 @@ static int route_param_get(struct sip_msg *msg,  pv_param_t *ip,
 /* (0 if drop or break encountered, 1 if not ) */
 static inline int run_actions(struct action* a, struct sip_msg* msg)
 {
-	int ret, _;
+	int ret, _, ret_lvl;
 	str top_route;
 
 	if (route_stack_size > ROUTE_MAX_REC_LEV) {
@@ -133,11 +133,15 @@ static inline int run_actions(struct action* a, struct sip_msg* msg)
 		goto error;
 	}
 
+	ret_lvl=script_return_push();
+
 	ret=run_action_list(a, msg);
 
 	/* if 'return', reset the flag */
 	if(action_flags&ACT_FL_RETURN)
 		action_flags &= ~ACT_FL_RETURN;
+
+	script_return_pop(ret_lvl);
 
 	return ret;
 
@@ -455,6 +459,7 @@ static pv_value_t *route_params_expand(struct sip_msg *msg,
 		LM_ERR("oom\n");
 		return NULL;
 	}
+	memset(route_vals, 0, params_no * sizeof(*route_vals));
 
 	for (index = 0; index < params_no; index++) {
 		res = &route_vals[index];
@@ -468,7 +473,12 @@ static pv_value_t *route_params_expand(struct sip_msg *msg,
 
 			case NUMBER_ST:
 				res->ri = actions[index].u.number;
-				res->flags = PV_VAL_STR|PV_VAL_INT|PV_TYPE_INT;
+				res->flags = PV_VAL_INT|PV_TYPE_INT;
+				tmp.s = sint2str(res->ri, &tmp.len);
+				if (pkg_str_dup(&res->rs, &tmp) == 0)
+					res->flags |= PV_VAL_STR|PV_VAL_PKG;
+				else
+					LM_ERR("cannot duplicate param value\n");
 				break;
 
 			case SCRIPTVAR_ST:
@@ -676,6 +686,10 @@ int do_action(struct action* a, struct sip_msg* msg)
 				action_flags |= ACT_FL_EXIT;
 			break;
 		case RETURN_T:
+				if (a->elem[1].type == EXPR_ST)
+					script_return_set(msg, a->elem[1].u.data);
+				else
+					script_return_set(msg, NULL);
 				script_trace("core", "return", msg, a->file, a->line) ;
 				if (a->elem[0].type == SCRIPTVAR_ST)
 				{
@@ -785,6 +799,7 @@ int do_action(struct action* a, struct sip_msg* msg)
 				if (!route_p) {
 					LM_ERR("could not expand route params!\n");
 					ret=E_OUT_OF_MEM;
+					break;
 				}
 				route_params_push_level(sroutes->request[i].name,
 						route_p, (void *)(unsigned long)len, route_param_get);
@@ -1052,13 +1067,13 @@ int do_action(struct action* a, struct sip_msg* msg)
 			break;
 		case ASYNC_T:
 			/* first param - an ACTIONS_ST containing an ACMD_ST
-			 * second param - a NUMBER_ST pointing to resume route
+			 * second param - a ROUTE_REF_ST pointing to resume route
 			 * third param - an optional NUMBER_ST with a timeout */
 			aitem = (struct action *)(a->elem[0].u.data);
 			acmd = (const acmd_export_t *)aitem->elem[0].u.data_const;
 
 			if (async_script_start_f==NULL || a->elem[0].type!=ACTIONS_ST ||
-			a->elem[1].type!=NUMBER_ST || aitem->type!=AMODULE_T) {
+			a->elem[1].type!=ROUTE_REF_ST || aitem->type!=AMODULE_T) {
 				LM_ALERT("BUG in async expression "
 				         "(is the 'tm' module loaded?)\n");
 			} else {
@@ -1071,7 +1086,8 @@ int do_action(struct action* a, struct sip_msg* msg)
 					break;
 				}
 
-				ret = async_script_start_f(msg, aitem, a->elem[1].u.number,
+				ret = async_script_start_f(msg, aitem,
+					(struct script_route_ref*)a->elem[1].u.data,
 					(unsigned int)a->elem[2].u.number, cmdp);
 				if (ret>=0)
 					action_flags |= ACT_FL_TBCONT;
@@ -1086,17 +1102,17 @@ int do_action(struct action* a, struct sip_msg* msg)
 			break;
 		case LAUNCH_T:
 			/* first param - an ACTIONS_ST containing an ACMD_ST
-			 * second param - an optional NUMBER_ST pointing to an end route */
+			 * second param - an optional ROUTE_REF_ST pointing to an end route */
 			aitem = (struct action *)(a->elem[0].u.data);
 			acmd = (const acmd_export_t *)aitem->elem[0].u.data_const;
 
 			if (async_script_start_f==NULL || a->elem[0].type!=ACTIONS_ST ||
-			a->elem[1].type!=NUMBER_ST || aitem->type!=AMODULE_T) {
+			a->elem[1].type!=ROUTE_REF_ST || aitem->type!=AMODULE_T) {
 				LM_ALERT("BUG in launch expression\n");
 			} else {
 				script_trace("launch", acmd->name, msg, a->file, a->line);
-				/* NOTE that the routeID (a->elem[1].u.number) is set to 
-				 * -1 if no reporting route is set */
+				/* NOTE that the routeID (a->elem[1].u.data) is set to 
+				 * NULL if no reporting route is set */
 
 				if ((ret = get_cmd_fixups(msg, acmd->params, aitem->elem,
 					cmdp, tmp_vals)) < 0) {
@@ -1111,10 +1127,12 @@ int do_action(struct action* a, struct sip_msg* msg)
 						break;
 					}
 
-					ret = async_script_launch( msg, aitem, a->elem[1].u.number,
+					ret = async_script_launch( msg, aitem,
+						(struct script_route_ref*)a->elem[1].u.data,
 						&sval, cmdp);
 				} else {
-					ret = async_script_launch( msg, aitem, a->elem[1].u.number,
+					ret = async_script_launch( msg, aitem,
+						(struct script_route_ref*)a->elem[1].u.data,
 						NULL, cmdp);
 				}
 
@@ -1157,6 +1175,7 @@ error:
 
 static int for_each_handler(struct sip_msg *msg, struct action *a)
 {
+	struct sip_msg *msg_src = msg;
 	pv_spec_p iter, spec;
 	pv_param_t pvp;
 	pv_value_t val;
@@ -1179,6 +1198,13 @@ static int for_each_handler(struct sip_msg *msg, struct action *a)
 		memset(&pvp, 0, sizeof pvp);
 		pvp.pvi.type = PV_IDX_INT;
 		pvp.pvn = spec->pvp.pvn;
+		if (spec->pvc && spec->pvc->contextf) {
+			msg_src = spec->pvc->contextf(msg);
+			if (!msg_src || msg_src == FAKED_REPLY) {
+				LM_BUG("Invalid pv context message: %p\n", msg_src);
+				return E_BUG;
+			}
+		}
 
 		/*
 		 * for $json iterators, better to assume script writer
@@ -1189,7 +1215,7 @@ static int for_each_handler(struct sip_msg *msg, struct action *a)
 			op = COLONEQ_T;
 
 		for (;;) {
-			if (spec->getf(msg, &pvp, &val) != 0) {
+			if (spec->getf(msg_src, &pvp, &val) != 0) {
 				LM_ERR("failed to get spec value\n");
 				return E_BUG;
 			}

@@ -242,14 +242,23 @@ void apply_cseq_decrement(struct cell* t, int type, struct tmcb_params *p)
 	apply_cseq_op(rpl, (int)cseq_req-(int)cseq_rpl);
 }
 
-int uac_auth( struct sip_msg *msg, int algmask)
+static int uac_auth_dlg_leg(struct dlg_cell *dlg, str *tag)
+{
+	if (!tag || tag->len == 0)
+		return dlg->legs_no[DLG_LEGS_USED]-1;
+	if (str_match(&dlg->legs[DLG_CALLER_LEG].tag, tag))
+		return DLG_CALLER_LEG;
+	else /* FIXME: shall we check the tag is really it? */
+		return callee_idx(dlg);
+}
+
+int uac_auth( struct sip_msg *msg, unsigned algmask)
 {
 	struct authenticate_body *auth = NULL;
 	str msg_body;
 	static struct authenticate_nc_cnonce auth_nc_cnonce;
 	struct uac_credential *crd;
-	int code, branch;
-	int new_cseq;
+	int code, branch, leg, new_cseq;
 	struct sip_msg *rpl;
 	struct cell *t;
 	struct digest_auth_response response;
@@ -298,7 +307,7 @@ int uac_auth( struct sip_msg *msg, int algmask)
 	}
 
 	if (auth == NULL) {
-		LM_ERR("Unable to extract authentication info\n");
+		LM_ERR("Unable to extract a compatible authentication challenge\n");
 		goto error;
 	}
 
@@ -354,7 +363,12 @@ int uac_auth( struct sip_msg *msg, int algmask)
 	else
 		dlg = NULL;
 
-	if (ttag.s==NULL || dlg==NULL || (dlg->flags&DLG_FLAG_CSEQ_ENFORCE)==0) {
+	if (dlg)
+		leg = uac_auth_dlg_leg(dlg, &ttag);
+	else
+		leg = 0;
+
+	if (ttag.s==NULL || dlg==NULL || (dlg->flags&DLG_FLAG_CSEQ_ENFORCE)==0 || dlg->legs[leg].last_gen_cseq==0) {
 
 		/* initial request or no dialog support
 		 * => do the changes over cseq from here */
@@ -377,7 +391,6 @@ int uac_auth( struct sip_msg *msg, int algmask)
 		 * CSEQ handling must be done only for intial request */
 		if (ttag.s==NULL) {
 			if (dlg) {
-				/* dlg->legs[dlg->legs_no[DLG_LEGS_USED]-1].last_gen_cseq = new_cseq; */
 				dlg->flags |= DLG_FLAG_CSEQ_ENFORCE;
 			} else {
 				param.len=rr_uac_cseq_param.len+3;
@@ -403,13 +416,27 @@ int uac_auth( struct sip_msg *msg, int algmask)
 				pkg_free(param.s);
 			}
 		}
+		else {
+			if (dlg) {
+				dlg->flags |= DLG_FLAG_CSEQ_ENFORCE;
+				leg = uac_auth_dlg_leg(dlg, &ttag);
+				dlg->legs[leg].last_gen_cseq = new_cseq;
+				LM_DBG("setting last_gen_cseq to [%d] for leg [%d]\n", new_cseq, leg);
+				if ( (force_master_cseq_change( msg, new_cseq)) < 0) {
+					LM_ERR("failed to forced new in-dialog cseq\n");
+					goto error;
+				}
+			}
+		}
 
 	} else {
 
 		/* this is a sequential with dialog support, so the dialog module
 		 * is already managing the cseq => tell directly the dialog module
 		 * about the cseq increasing */
-		new_cseq = ++dlg->legs[dlg->legs_no[DLG_LEGS_USED]-1].last_gen_cseq;
+		leg = uac_auth_dlg_leg(dlg, &ttag);
+		new_cseq = ++dlg->legs[leg].last_gen_cseq;
+		LM_DBG("incrementing last_gen_cseq to [%d] for leg[%d]\n", new_cseq, leg);
 
 		/* as we expect to have the request already altered (by the dialog 
 		 * module) with a new cseq, to invalidate that change, we do a trick
@@ -459,4 +486,33 @@ void rr_uac_auth_checker(struct sip_msg *msg, str *r_param, void *cb_param)
 		LM_ERR("Failed to register TMCB response fwded - continue \n");
 		return;
 	}
+}
+
+int uac_inc_cseq(struct sip_msg *msg, int val)
+{
+	struct cell *t = uac_tmb.t_gett();
+	if (t==T_UNDEFINED || t==T_NULL_CELL)
+	{
+		LM_CRIT("no current transaction found\n");
+		return -1;
+	}
+
+	if (apply_cseq_op(msg, val) < 0) {
+		LM_WARN("Failed to increment the CSEQ header!\n");
+		return -1;
+	}
+
+	/* only register the TMCB once per transaction */
+	if (!(msg->msg_flags & FL_USE_UAC_CSEQ ||
+	t->uas.request->msg_flags & FL_USE_UAC_CSEQ)) {
+		if (uac_tmb.register_tmcb( msg, 0, TMCB_RESPONSE_FWDED,
+		apply_cseq_decrement,0,0)!=1) {
+			LM_ERR("Failed to register TMCB response fwded - continue \n");
+			return -1;
+		}
+	}
+	msg->msg_flags |= FL_USE_UAC_CSEQ;
+	t->uas.request->msg_flags |= FL_USE_UAC_CSEQ;
+
+	return 1;
 }

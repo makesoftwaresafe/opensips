@@ -288,7 +288,7 @@ static int openssl_tls_conn_shutdown(struct tcp_connection *c)
 		LM_DBG("shutdown successful\n");
 		return 0;
 	} else if (ret == 0) {
-		#ifndef NO_SSL_GLOBAL_LO
+		#ifndef NO_SSL_GLOBAL_LOCK
 		lock_release(tls_global_lock);
 		#endif
 		LM_DBG("first phase of 2-way handshake completed succesfuly\n");
@@ -679,7 +679,7 @@ int openssl_tls_async_connect(struct tcp_connection *con, int fd,
 
 		n = SSL_connect(ssl);
 		if (n > 0) {
-			#ifndef NO_SSL_GLOBAL_LOC
+			#ifndef NO_SSL_GLOBAL_LOCK
 			lock_release(tls_global_lock);
 			#endif
 
@@ -693,7 +693,7 @@ int openssl_tls_async_connect(struct tcp_connection *con, int fd,
 			return 1;
 		} else if (n == 0) {
 			err = SSL_get_error(ssl, n);
-			#ifndef NO_SSL_GLOBAL_LOC
+			#ifndef NO_SSL_GLOBAL_LOCK
 			lock_release(tls_global_lock);
 			#endif
 
@@ -756,7 +756,12 @@ again:
 #endif
 				{
 					err_len=sizeof(err);
-					getsockopt(fd, SOL_SOCKET, SO_ERROR, &err, &err_len);
+					if (getsockopt(fd, SOL_SOCKET, SO_ERROR, &err, &err_len) != 0) {
+						LM_WARN("getsockopt error: fd=%d [server=%s:%d]: (%d) %s\n", fd,
+								ip_addr2a(&con->rcv.src_ip), con->rcv.src_port,
+								errno, strerror(errno));
+						goto failure;
+					}
 					if ((err==0) && (poll_err==0))
 						continue; /* retry ssl connect */
 					if (err!=EINPROGRESS && err!=EALREADY){
@@ -833,7 +838,7 @@ int openssl_tls_write(struct tcp_connection *c, int fd, const void *buf,
 
 	ret = SSL_write(ssl, buf, len);
 	if (ret > 0) {
-		#ifndef NO_SSL_GLOBAL_LOC
+		#ifndef NO_SSL_GLOBAL_LOCK
 		lock_release(tls_global_lock);
 		#endif
 
@@ -1033,7 +1038,7 @@ static int openssl_read(struct tcp_connection *c, void *buf, size_t len)
 
 	ssl = c->extra_data;
 
-	#ifndef NO_SSL_GLOBAL_LO
+	#ifndef NO_SSL_GLOBAL_LOCK
 	lock_get(tls_global_lock);
 	#endif
 
@@ -1041,14 +1046,14 @@ static int openssl_read(struct tcp_connection *c, void *buf, size_t len)
 
 	ret = SSL_read(ssl, buf, len);
 	if (ret > 0) {
-		#ifndef NO_SSL_GLOBAL_LOC
+		#ifndef NO_SSL_GLOBAL_LOCK
 		lock_release(tls_global_lock);
 		#endif
 
 		LM_DBG("%d bytes read\n", ret);
 		return ret;
 	} else if (ret == 0) {
-		#ifndef NO_SSL_GLOBAL_LOC
+		#ifndef NO_SSL_GLOBAL_LOCK
 		lock_release(tls_global_lock);
 		#endif
 
