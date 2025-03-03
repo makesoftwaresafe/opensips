@@ -218,7 +218,7 @@ b2b_dlg_t* b2b_search_htable(b2b_table table, unsigned int hash_index,
 
 /* this is only called by server new */
 str* b2b_htable_insert(b2b_table table, b2b_dlg_t* dlg, int hash_index,
-	time_t timestamp, int src, int safe, int db_insert, unsigned int ua_timeout)
+	str *init_b2b_key, int src, int safe, int db_insert, unsigned int ua_timeout)
 {
 	b2b_dlg_t * it, *prev_it= NULL;
 	str* b2b_key;
@@ -243,14 +243,18 @@ str* b2b_htable_insert(b2b_table table, b2b_dlg_t* dlg, int hash_index,
 		prev_it->next = dlg;
 		dlg->prev = prev_it;
 	}
-	/* if an insert in server_htable -> copy the b2b_key in the to_tag */
-	b2b_key = b2b_generate_key(hash_index, dlg->id, timestamp);
-	if(b2b_key == NULL)
-	{
-		if(!safe)
-			B2BE_LOCK_RELEASE(table, hash_index);
-		LM_ERR("Failed to generate b2b key\n");
-		return NULL;
+	if (!init_b2b_key) {
+		/* if an insert in server_htable -> copy the b2b_key in the to_tag */
+		b2b_key = b2b_generate_key(hash_index, dlg->id);
+		if(b2b_key == NULL)
+		{
+			if(!safe)
+				B2BE_LOCK_RELEASE(table, hash_index);
+			LM_ERR("Failed to generate b2b key\n");
+			return NULL;
+		}
+	} else {
+		b2b_key = init_b2b_key;
 	}
 
 	if(src == B2B_SERVER)
@@ -261,8 +265,7 @@ str* b2b_htable_insert(b2b_table table, b2b_dlg_t* dlg, int hash_index,
 			LM_ERR("No more shared memory\n");
 			if(!safe)
 				B2BE_LOCK_RELEASE(table, hash_index);
-			pkg_free(b2b_key);
-			return 0;
+			goto err_free;
 		}
 		memcpy(dlg->tag[CALLEE_LEG].s, b2b_key->s, b2b_key->len);
 		dlg->tag[CALLEE_LEG].len = b2b_key->len;
@@ -276,8 +279,7 @@ str* b2b_htable_insert(b2b_table table, b2b_dlg_t* dlg, int hash_index,
 			LM_ERR("Failed to insert into timer list\n");
 			if(!safe)
 				B2BE_LOCK_RELEASE(table, hash_index);
-			pkg_free(b2b_key);
-			return 0;
+			goto err_free;
 		}
 	}
 
@@ -288,13 +290,16 @@ str* b2b_htable_insert(b2b_table table, b2b_dlg_t* dlg, int hash_index,
 		B2BE_LOCK_RELEASE(table, hash_index);
 
 	return b2b_key;
+err_free:
+	if (!init_b2b_key)
+		pkg_free(b2b_key);
+	return NULL;
 }
 
-/* key format : B2B.hash_index.local_index.timestamp *
+/* key format : B2B.hash_index.local_index.timestamp.random *
  */
 
-int b2b_parse_key(str* key, unsigned int* hash_index, unsigned int* local_index,
-	uint64_t *timestamp)
+int b2b_parse_key(str* key, unsigned int* hash_index, unsigned int* local_index)
 {
 	char* p;
 	str s;
@@ -340,34 +345,20 @@ int b2b_parse_key(str* key, unsigned int* hash_index, unsigned int* local_index,
 		return -1;
 	}
 
-	if (timestamp) {
-		s.s = p+1;
-		s.len = key->len - (s.s - key->s);
-		if(str2int64(&s, timestamp) < 0)
-		{
-			LM_DBG("Could not extract timestamp [%.*s] from key [%.*s]\n", s.len, s.s, key->len, key->s);
-			return -1;
-		}
-
-		LM_DBG("hash_index = [%d] - local_index = [%d] - timestamp = %ld\n",
-			*hash_index, *local_index, (time_t)*timestamp);
-	} else {
-		/* we do not really care about the third part of the key */
-		LM_DBG("hash_index = [%d]  - local_index= [%d]\n", *hash_index, *local_index);
-	}
+	/* we do not really care about the last parts of the key */
+	LM_DBG("hash_index = [%d]  - local_index= [%d]\n", *hash_index, *local_index);
 
 	return 0;
 }
 
-str* b2b_generate_key(unsigned int hash_index, unsigned int local_index,
-	time_t timestamp)
+str* b2b_generate_key(unsigned int hash_index, unsigned int local_index)
 {
 	char buf[B2B_MAX_KEY_SIZE];
 	str* b2b_key;
 	int len;
 
-	len = sprintf(buf, "%s.%d.%d.%ld", b2b_key_prefix.s, hash_index, local_index,
-		timestamp ? timestamp : startup_time+get_ticks());
+	len = sprintf(buf, "%s.%d.%d.%lld.%d", b2b_key_prefix.s, hash_index, local_index,
+		(long long)(startup_time+get_ticks()), rand());
 
 	b2b_key = (str*)pkg_malloc(sizeof(str)+ len);
 	if(b2b_key== NULL)
@@ -546,11 +537,13 @@ static b2b_dlg_t* b2bl_search_iteratively(str* callid, str* from_tag,
 	return dlg;
 }
 
-void b2b_run_cb(b2b_dlg_t *dlg, unsigned int hash_index, int entity_type,
+int b2b_run_cb(b2b_dlg_t *dlg, unsigned int hash_index, int entity_type,
 	int cbs_type, int event_type, bin_packet_t *storage, int backend)
 {
 	struct b2b_callback *cb;
 	str st;
+	b2b_dlg_t *aux_dlg;
+	b2b_table table = entity_type == B2B_SERVER ? server_htable:client_htable;
 
 	/* search for the callback registered by the module that
 	 * this entity belongs to */
@@ -568,17 +561,17 @@ void b2b_run_cb(b2b_dlg_t *dlg, unsigned int hash_index, int entity_type,
 	if (cbs_type == B2BCB_TRIGGER_EVENT) {
 		if (!cb) {
 			storage->buffer.s = NULL;
-			return;
+			return 0;
 		}
 
 		if (bin_init(storage, &storage_cap, B2BE_STORAGE_BIN_TYPE,
 			B2BE_STORAGE_BIN_VERS, 0) < 0) {
 			LM_ERR("Failed to init entity storage buffer\n");
-			return;
+			return -1;
 		}
 	} else {  /* B2BCB_RECV_EVENT */
 		if (!cb)
-			return;
+			return 0;
 
 		if (bin_get_content_pos(storage, &st) > 0) {
 			if (b2be_db_mode != NO_DB && event_type != B2B_EVENT_DELETE) {
@@ -591,7 +584,7 @@ void b2b_run_cb(b2b_dlg_t *dlg, unsigned int hash_index, int entity_type,
 						shm_free(dlg->storage.s);
 					if (shm_str_dup(&dlg->storage, &st) < 0) {
 						LM_ERR("oom!\n");
-						return;
+						return -1;
 					}
 				}
 			}
@@ -600,18 +593,24 @@ void b2b_run_cb(b2b_dlg_t *dlg, unsigned int hash_index, int entity_type,
 		}
 	}
 
-	if (entity_type == B2B_SERVER)
-		B2BE_LOCK_RELEASE(server_htable, hash_index);
-	else
-		B2BE_LOCK_RELEASE(client_htable, hash_index);
+	B2BE_LOCK_RELEASE(table, hash_index);
 
 	cb->cbf(entity_type, entity_type == B2B_SERVER ? &dlg->tag[1] : &dlg->callid,
 		&dlg->logic_key, dlg->param, event_type, storage, backend);
 
-	if (entity_type == B2B_SERVER)
-		B2BE_LOCK_GET(server_htable, hash_index);
-	else
-		B2BE_LOCK_GET(client_htable, hash_index);
+	B2BE_LOCK_GET(table, hash_index);
+
+	/* search the dialog */
+	for(aux_dlg = table[hash_index].first; aux_dlg; aux_dlg = aux_dlg->next)
+	{
+		if(aux_dlg == dlg)
+			break;
+	}
+	if(!aux_dlg)
+	{
+		LM_DBG("Record not found anymore\n");
+		return 1;
+	}
 
 	if (cbs_type == B2BCB_TRIGGER_EVENT && event_type != B2B_EVENT_DELETE &&
 		b2be_db_mode != NO_DB && bin_get_content_start(storage, &st) > 0) {
@@ -622,10 +621,12 @@ void b2b_run_cb(b2b_dlg_t *dlg, unsigned int hash_index, int entity_type,
 				shm_free(dlg->storage.s);
 			if (shm_str_dup(&dlg->storage, &st) < 0) {
 				LM_ERR("oom!\n");
-				return;
+				return -1;
 			}
 		}
 	}
+
+	return 0;
 }
 
 static void run_create_cb_all(struct b2b_callback *cb, int etype)
@@ -712,6 +713,7 @@ int b2b_register_cb(b2b_cb_t cb, int cb_type, str *mod_name)
 	return 0;
 }
 
+
 int b2b_prescript_f(struct sip_msg *msg, void *uparam)
 {
 	str b2b_key;
@@ -765,8 +767,7 @@ int b2b_prescript_f(struct sip_msg *msg, void *uparam)
 				rt->nameaddr.uri.len,rt->nameaddr.uri.s);
 			return SCB_RUN_ALL;
 		}
-		if (check_self( &puri.host, puri.port_no?puri.port_no:SIP_PORT,
-		puri.proto?puri.proto:PROTO_UDP)!= 1 ) {
+		if (check_self_strict( &puri.host, puri.port_no, puri.proto)!= 1 ) {
 			LM_DBG("First Route uri is not mine\n");
 			return SCB_RUN_ALL;  /* not for b2b */
 
@@ -784,13 +785,12 @@ int b2b_prescript_f(struct sip_msg *msg, void *uparam)
 			}
 		}
 		if (rt) {
-			if ( parse_uri(rt->nameaddr.uri.s,rt->nameaddr.uri.len,&puri)!=0 ) {
+			if ( parse_uri(rt->nameaddr.uri.s,rt->nameaddr.uri.len,&puri)!=0 ){
 				LM_ERR("Second route uri is not valid <%.*s>\n",
 					rt->nameaddr.uri.len,rt->nameaddr.uri.s);
 				return SCB_RUN_ALL;
 			}
-			if (check_self( &puri.host, puri.port_no?puri.port_no:SIP_PORT,
-			puri.proto?puri.proto:PROTO_UDP)!= 1 ) {
+			if (check_self_strict( &puri.host, puri.port_no, puri.proto)!= 1 ){
 				LM_DBG("Second Route uri is not mine\n");
 				return SCB_RUN_ALL;  /* not for b2b */
 			}
@@ -821,7 +821,7 @@ int b2b_prescript_f(struct sip_msg *msg, void *uparam)
 	if(method_value!= METHOD_CANCEL)
 	{
 		LM_DBG("<uri> host:port [%.*s][%d]\n", host.len, host.s, port);
-		if (!check_self( &host, port ? port : SIP_PORT, msg->rcv.proto))
+		if (check_self_strict( &host, port, msg->parsed_uri.proto)!= 1 )
 		{
 			LM_DBG("RURI does not point to me\n");
 			return SCB_RUN_ALL;
@@ -884,13 +884,13 @@ search_dialog:
 		*/
 		dlg = b2bl_search_iteratively(&callid, &from_tag, T_invite,
 			hash_index);
-		tmb.unref_cell( T_invite );
 		if(dlg == NULL)
 		{
 			B2BE_LOCK_RELEASE(server_htable, hash_index);
 			LM_DBG("No dialog found for cancel\n");
 			return SCB_RUN_ALL;
 		}
+		tmb.unref_cell( T_invite );
 
 		ctx = b2b_get_context();
 		if (!ctx) {
@@ -953,7 +953,7 @@ search_dialog:
 	b2b_key = to_tag;
 	/* check if the to tag has the b2b key format -> meaning
 	 * that it is a server request */
-	if(b2b_key.s && b2b_parse_key(&b2b_key, &hash_index, &local_index,NULL)>=0)
+	if(b2b_key.s && b2b_parse_key(&b2b_key, &hash_index, &local_index)>=0)
 	{
 		LM_DBG("Received a b2b server request [%.*s]\n",
 					msg->first_line.u.request.method.len,
@@ -965,7 +965,7 @@ search_dialog:
 		/* check if the callid is in b2b format -> meaning
 		 * that this is a client request */
 		b2b_key = msg->callid->body;
-		if(b2b_parse_key(&b2b_key, &hash_index, &local_index, NULL) >= 0)
+		if(b2b_parse_key(&b2b_key, &hash_index, &local_index) >= 0)
 		{
 			LM_DBG("received a b2b client request [%.*s]\n",
 				msg->first_line.u.request.method.len,
@@ -1003,25 +1003,29 @@ search_dialog:
 			&to_tag, &from_tag, &callid);
 		if(dlg== NULL)
 		{
-			LM_DBG("No dialog found\n");
-			if(method_value != METHOD_ACK)
+			/* this is a requests which is 100% for the B2B engine, but
+			 * it is not matching any ongoing/active dialogs ->
+			 * -> we should reject with 481 and discard */
+			LM_DBG("No dialog found, callid= [%.*s], method=%.*s\n",
+				callid.len, callid.s,msg->first_line.u.request.method.len,
+				msg->first_line.u.request.method.s);
+			if(method_value == METHOD_ACK)
+			{
+				tmb.t_newtran(msg);
+			} else
+			if(method_value == METHOD_BYE)
 			{
 				str ok = str_init("OK");
-
-				if(method_value == METHOD_BYE)
-					tmb.t_reply(msg, 200, &ok);
-				else
-					LM_ERR("No dialog found, callid= [%.*s], method=%.*s\n",
-						callid.len, callid.s,msg->first_line.u.request.method.len,
-						msg->first_line.u.request.method.s);
+				tmb.t_reply(msg, 200, &ok);
 			} else {
-				tmb.t_newtran(msg);
-				tm_tran = tmb.t_gett();
-				if (tm_tran && tm_tran!=T_UNDEFINED)
-					tmb.unref_cell(tm_tran);
+				str ko = str_init("Call/Transaction Does Not Exist");
+				tmb.t_reply(msg, 481, &ko);
 			}
+			tm_tran = tmb.t_gett();
+			if (tm_tran && tm_tran!=T_UNDEFINED)
+				tmb.unref_cell(tm_tran);
 			B2BE_LOCK_RELEASE(table, hash_index);
-			return SCB_RUN_ALL;
+			return SCB_DROP_MSG;
 		}
 	}
 
@@ -1039,23 +1043,30 @@ search_dialog:
 
 	if (method_value == METHOD_PRACK)
 	{
-		B2BE_LOCK_RELEASE(table, hash_index);
-		LM_DBG("Received a PRACK - send 200 reply\n");
-		str reason={"OK", 2};
-		/* send 200 OK and exit */
-		tmb.t_newtran( msg );
-		tm_tran = tmb.t_gett();
-		if (dlg)
-			b2b_run_tracer(dlg, msg, tm_tran);
-		tmb.t_reply(msg, 200, &reason);
-		if(tm_tran && tm_tran!=T_UNDEFINED)
-			tmb.unref_cell(tm_tran);
+		if (passthru_prack) {
+			// If we are asked to passthrough PRACKs, let's make sure the other leg is notified
+			goto logic_notify;
+		}
+		else
+		{
+			B2BE_LOCK_RELEASE(table, hash_index);
+			LM_DBG("Received a PRACK - send 200 reply\n");
+			str reason={"OK", 2};
+			/* send 200 OK and exit */
+			tmb.t_newtran( msg );
+			tm_tran = tmb.t_gett();
+			if (dlg)
+				b2b_run_tracer(dlg, msg, tm_tran);
+			tmb.t_reply(msg, 200, &reason);
+			if(tm_tran && tm_tran!=T_UNDEFINED)
+				tmb.unref_cell(tm_tran);
 
-		/* No need to apply lumps */
-		if(req_routeid > 0)
-			run_top_route(sroutes->request[req_routeid], msg);
+		        /* No need to apply lumps */
+		        if(ref_script_route_is_valid(req_route_ref))
+			        run_top_route(sroutes->request[req_route_ref->idx], msg);
 
-		goto done;
+			return SCB_DROP_MSG;
+		}
 	}
 
 	if(dlg->state < B2B_CONFIRMED)
@@ -1082,10 +1093,10 @@ search_dialog:
 logic_notify:
 	etype = (table==server_htable?B2B_SERVER:B2B_CLIENT);
 
-	if(req_routeid > 0)
+	if(ref_script_route_is_valid(req_route_ref))
 	{
 		B2BE_LOCK_RELEASE(table, hash_index);
-		run_top_route(sroutes->request[req_routeid], msg);
+		run_top_route(sroutes->request[req_route_ref->idx], msg);
 		if (b2b_apply_lumps(msg))
 		{
 			if (parse_from_header(msg) < 0)
@@ -1124,33 +1135,33 @@ logic_notify:
 
 	if(method_value != METHOD_CANCEL)
 	{
-		ret = tmb.t_newtran(msg);
-		if(ret < 1 && method_value != METHOD_ACK)
-		{
-			if(ret== 0)
-			{
-				LM_DBG("It is a retransmission, drop\n");
-			}
-			else
-				LM_DBG("Error when creating tm transaction\n");
-			B2BE_LOCK_RELEASE(table, hash_index);
-			return SCB_DROP_MSG;
-		}
-
-		tm_tran = tmb.t_gett();
-
-		/* if a valid transaction was created, trace it
-		   NOTE that the end2end ACK forms a separate transaction
-		   (even if TM will return a NULL transaction) and
-		   we will trace it as standalone request, while a negative hop-by-hop ACK
-		   (part of INVITE transaction) we will get T_UNDEFINED, so not to be traced
-		*/
-		if (tm_tran != T_UNDEFINED)
-			b2b_run_tracer(dlg, msg, tm_tran);
-
 		if(method_value != METHOD_ACK)
 		{
-			if(method_value == METHOD_UPDATE)
+			ret = tmb.t_newtran(msg);
+			if (ret < 1)
+			{
+				if(ret== 0)
+				{
+					LM_DBG("It is a retransmission, drop\n");
+				}
+				else
+					LM_DBG("Error when creating tm transaction\n");
+				B2BE_LOCK_RELEASE(table, hash_index);
+				return SCB_DROP_MSG;
+			}
+			tm_tran = tmb.t_gett();
+			if (tm_tran != T_UNDEFINED)
+				b2b_run_tracer(dlg, msg, tm_tran);
+
+
+			if (method_value == METHOD_PRACK)
+			{
+				/* Because PRACK transactions are separate from whatever UAS is dealing with now (PRACKs can come before
+				   INVITE is answered and will have new CSeq), we need to make sure we store it for when we get response for it. */
+				dlg->prack_tran = tm_tran;
+				dlg->cseq[CALLEE_LEG]++;
+			}
+			else if(method_value == METHOD_UPDATE)
 			{
 				dlg->update_tran = tm_tran;
 			}
@@ -1161,72 +1172,143 @@ logic_notify:
 					tmb.t_setkr(REQ_FWDED);
 				}
 
-				if(dlg->uas_tran && dlg->uas_tran!=T_UNDEFINED)
+				if(dlg->uac_tran && dlg->uac_tran!=T_UNDEFINED)
 				{
-					if(dlg->uas_tran->uas.request)
-					/* there is another transaction for which no reply
-					 * was sent out */
+					/* We have an UAC ongoing transaction in the dialog
+					 * -> reject with 491 Request Pending */
+					/* send reply */
+					LM_DBG("Received a request while having an ongoing "
+						"outbound/UAC one\n");
+					str text = str_init("Request Pending");
+					if(tmb.t_reply_with_body( tm_tran, 491,
+					&text, 0, 0, &to_tag) < 0)
 					{
-						if (method_value != METHOD_BYE) {
-							/* send reply */
-							LM_DBG("Received another request when the previous "
-								"one was in process\n");
-							str text = str_init("Request Pending");
-							if(tmb.t_reply_with_body( tm_tran, 491,
-							&text, 0, 0, &to_tag) < 0)
-							{
-								LM_ERR("failed to send reply with tm\n");
-							}
-							LM_DBG("Sent reply [491] and unreffed the cell %p\n",
-								tm_tran);
-						} else {
-							LM_DBG("Received BYE while another request "
-								"was in process\n");
-							str text_ok = str_init("OK");
-							if(tmb.t_reply_with_body( tm_tran, 200,
-							&text_ok, 0, 0, &to_tag) < 0)
-							{
-								LM_ERR("failed to send reply with tm\n");
-							}
-							LM_DBG("Sent reply [200] and unreffed the cell %p\n",
-								tm_tran);
-							tmb.unref_cell(tm_tran);
-
-							str text_term = str_init("Request Terminated");
-							if(tmb.t_reply_with_body(dlg->uas_tran, 487,
-							&text_term, 0, 0, &to_tag) < 0)
-							{
-								LM_ERR("failed to send reply with tm\n");
-							}
-							LM_DBG("Sent reply [487] and unreffed the cell %p\n",
-								dlg->uas_tran);
-
-							tmb.unref_cell(dlg->uas_tran);
-							dlg->uas_tran = NULL;
-
-							b2b_cb_flags |= B2B_NOTIFY_FL_TERM_BYE;
-							goto run_cb;
-						}
+						LM_ERR("failed to send reply with tm\n");
 					}
+					LM_DBG("Sent reply [491] and unreffed the cell %p\n",
+						tm_tran);
+
 					tmb.unref_cell(tm_tran); /* for t_newtran() */
 					B2BE_LOCK_RELEASE(table, hash_index);
 					return SCB_DROP_MSG;
+				} else
+				if(dlg->uas_tran && dlg->uas_tran!=T_UNDEFINED)
+				{
+					if (method_value != METHOD_BYE) {
+						/* We have another UAS ongoing transaction on the dialog
+						 * -> reject with 500, "Overlapping Requests" */
+						#define RETRY_AFTER_HDR "Retry-After: "
+						#define RETRY_AFTER_HDR_LEN (sizeof("Retry-After: ")-1)
+						char ra_s[RETRY_AFTER_HDR_LEN + 3 + CRLF_LEN];
+						str ra = {ra_s, 0};
+						str text = str_init("Overlapping Requests");
+						LM_DBG("Received another request when the previous "
+								"one was in process\n");
+						memcpy( ra.s+ra.len, RETRY_AFTER_HDR, RETRY_AFTER_HDR_LEN);
+						ra.len += RETRY_AFTER_HDR_LEN;
+						/* the retry value is between 0 and 10 */
+						ra.len += btostr(ra.s+ra.len, (unsigned char)(rand()%10) );
+						memcpy( ra.s+ra.len, CRLF, CRLF_LEN);
+						ra.len += CRLF_LEN;
+						/* send reply */
+						if(tmb.t_reply_with_body( tm_tran, 500,
+						&text, 0, &ra, &to_tag) < 0)
+						{
+							LM_ERR("failed to send reply with tm\n");
+						}
+						LM_DBG("Sent reply [500] and unreffed the cell %p\n",
+							tm_tran);
+						tmb.unref_cell(tm_tran); /* for t_newtran() */
+						B2BE_LOCK_RELEASE(table, hash_index);
+						return SCB_DROP_MSG;
+					} else {
+						LM_DBG("Received BYE while having an ongoing "
+							"inbound/UAS transaction\n");
+						str text_ok = str_init("OK");
+						if(tmb.t_reply_with_body( tm_tran, 200,
+						&text_ok, 0, 0, &to_tag) < 0)
+						{
+							LM_ERR("failed to send reply with tm\n");
+						}
+						LM_DBG("Sent reply [200] and unreffed the cell %p\n",
+							tm_tran);
+						tmb.unref_cell(tm_tran);
+
+						str text_term = str_init("Request Terminated");
+						if(tmb.t_reply_with_body(dlg->uas_tran, 487,
+						&text_term, 0, 0, &to_tag) < 0)
+						{
+							LM_ERR("failed to send reply with tm\n");
+						}
+						LM_DBG("Sent reply [487] and unreffed the cell %p\n",
+							dlg->uas_tran);
+
+						tmb.unref_cell(dlg->uas_tran);
+						dlg->uas_tran = NULL;
+
+						b2b_cb_flags |= B2B_NOTIFY_FL_TERM_BYE;
+						goto run_cb;
+					}
 				}
+
+				/* the new request is accepted for handling */
 				dlg->uas_tran = tm_tran;
 				LM_DBG("Saved uas_tran=[%p] for dlg[%p]\n", tm_tran, dlg);
 			}
 		}
 		else
 		{
-			if(!tm_tran || tm_tran==T_UNDEFINED) {
-				tm_tran = tmb.t_get_e2eackt();
-				if (!tm_tran || tm_tran==T_UNDEFINED)
-					/* ACK for a negative reply */
-					b2b_cb_flags |= B2B_NOTIFY_FL_ACK_NEG;
+			ret = tmb.t_check_trans(msg);
+			switch (ret) {
+				case 1: /* hop-by-hop ACK */
+					tm_tran = tmb.t_gett();
+					/* just grab the transaction and release it */
+					tmb.t_sett(T_UNDEFINED);
+					break;
+				case -2: /* end-to-end ACK */
+					tm_tran = tmb.t_get_e2eackt();
+					break;
+				default:
+					tm_tran = NULL;
+					break;
+			}
+			/* if we managed to find a coresponding hop-by-hop INVITE transaction
+			 * or it is a valid end-to-end ACK, unlink from the dialog */
+			if (tm_tran && tm_tran != T_UNDEFINED) {
+				if (dlg->uas_tran == tm_tran) {
+					tmb.t_release_trans(dlg->uas_tran);
+					tmb.unref_cell(dlg->uas_tran);
+					dlg->uas_tran = NULL;
+				}
+				if (ret == 1)
+					tmb.unref_cell(tm_tran);
 			}
 
-			if(tm_tran && tm_tran!=T_UNDEFINED)
-				tmb.unref_cell(tm_tran);
+			ret = tmb.t_newtran(msg);
+			if (ret >= 0) {
+				tm_tran = tmb.t_gett();
+				/* if a valid transaction was created, trace it
+				   NOTE that the end2end ACK forms a separate transaction
+				   (even if TM will return a NULL transaction) and
+				   we will trace it as standalone request, while a negative hop-by-hop ACK
+				   (part of INVITE transaction) we will get T_UNDEFINED, so not to be traced
+				   */
+				if (tm_tran && tm_tran != T_UNDEFINED)
+					b2b_run_tracer(dlg, msg, tm_tran);
+				/* we got an ACK - we need to fetch its initial transaction */
+				if(!tm_tran || tm_tran==T_UNDEFINED)
+					tm_tran = tmb.t_get_e2eackt();
+
+				if(!tm_tran || tm_tran==T_UNDEFINED) {
+					tm_tran = tmb.t_get_e2eackt();
+					if (!tm_tran || tm_tran==T_UNDEFINED)
+						/* ACK for a negative reply */
+						b2b_cb_flags |= B2B_NOTIFY_FL_ACK_NEG;
+				}
+
+				if(tm_tran && tm_tran!=T_UNDEFINED)
+					tmb.unref_cell(tm_tran);
+			}
 		}
 	}
 
@@ -1278,13 +1360,17 @@ run_cb:
 		}
 
 		if (ua_ev_type != -1 && raise_ua_sess_event(&b2b_key, etype, ua_ev_type,
-			ua_flags, msg) < 0) {
+			ua_flags, msg, NULL) < 0) {
 			LM_ERR("Failed to raise E_UA_SESSION event\n");
 			return SCB_DROP_MSG;
 		}
 	} else {
-		b2b_cback(msg, &b2b_key, B2B_REQUEST, logic_key.s?&logic_key:0,
-			dlg->param, b2b_cb_flags);
+		if (!b2b_cback)
+			LM_DBG("calback not yet registered for [%.*s]\n",
+					(logic_key.s?logic_key.len:0), (logic_key.s?logic_key.s:""));
+		else
+			b2b_cback(msg, &b2b_key, B2B_REQUEST, logic_key.s?&logic_key:0,
+				dlg->param, b2b_cb_flags);
 
 		if(logic_key.s)
 			pkg_free(logic_key.s);
@@ -1312,13 +1398,15 @@ run_cb:
 		if (dlg_state == B2B_ESTABLISHED) {
 			b2b_ev = B2B_EVENT_ACK;
 
-			b2b_run_cb(dlg, hash_index, etype, B2BCB_TRIGGER_EVENT, b2b_ev,
-				&storage, serialize_backend);
+			if (b2b_run_cb(dlg, hash_index, etype, B2BCB_TRIGGER_EVENT, b2b_ev,
+				&storage, serialize_backend) != 0)
+				goto done;
 		} else if (dlg_state == B2B_TERMINATED) {
 			b2b_ev = B2B_EVENT_DELETE;
 
-			b2b_run_cb(dlg, hash_index, etype, B2BCB_TRIGGER_EVENT, b2b_ev,
-				&storage, serialize_backend);
+			if (b2b_run_cb(dlg, hash_index, etype, B2BCB_TRIGGER_EVENT, b2b_ev,
+				&storage, serialize_backend) != 0)
+				goto done;
 		}
 	}
 
@@ -1354,7 +1442,7 @@ run_cb:
 	}
 
 done:
-
+	lock_release(&table[hash_index].lock);
 	return SCB_DROP_MSG;
 }
 
@@ -1405,6 +1493,8 @@ void destroy_b2b_htables(void)
 					shm_free(dlg->storage.s);
 				if(dlg->ack_sdp.s)
 					shm_free(dlg->ack_sdp.s);
+				if(dlg->prack_headers.s)
+					shm_free(dlg->prack_headers.s);
 				if (dlg->logic_key.s)
 					shm_free(dlg->logic_key.s);
 				if (dlg->free_param)
@@ -1428,6 +1518,8 @@ void destroy_b2b_htables(void)
 				b2b_delete_legs(&dlg->legs);
 				if(dlg->ack_sdp.s)
 					shm_free(dlg->ack_sdp.s);
+				if(dlg->prack_headers.s)
+					shm_free(dlg->prack_headers.s);
 				if (dlg->logic_key.s)
 					shm_free(dlg->logic_key.s);
 				if (dlg->free_param)
@@ -1650,7 +1742,7 @@ int _b2b_send_reply(b2b_dlg_t* dlg, b2b_rpl_data_t* rpl_data)
 	}
 
 	/* parse the key and find the position in hash table */
-	if(b2b_parse_key(b2b_key, &hash_index, &local_index, NULL) < 0)
+	if(b2b_parse_key(b2b_key, &hash_index, &local_index) < 0)
 	{
 		LM_ERR("Wrong format for b2b key\n");
 		return -1;
@@ -1682,12 +1774,16 @@ int _b2b_send_reply(b2b_dlg_t* dlg, b2b_rpl_data_t* rpl_data)
 		return 0;
 	}
 */
-	if(et == B2B_CLIENT)
+	if (rpl_data->contact)
+		local_contact = *rpl_data->contact;
+	else if(et == B2B_CLIENT)
 		local_contact = dlg->contact[CALLER_LEG];
 	else
 		local_contact = dlg->contact[CALLEE_LEG];
 
-	if(sip_method == METHOD_UPDATE)
+	if(sip_method == METHOD_PRACK) {
+		tm_tran = dlg->prack_tran;
+	} else if (sip_method == METHOD_UPDATE)
 		tm_tran = dlg->update_tran;
 	else
 	{
@@ -1747,12 +1843,13 @@ int _b2b_send_reply(b2b_dlg_t* dlg, b2b_rpl_data_t* rpl_data)
 			else if (!dlg->uac_tran && dlg->state != B2B_MODIFIED)
 				dlg->state= B2B_TERMINATED;
 			UPDATE_DBFLAG(dlg);
+		} else {
+			LM_DBG("Reset transaction- send final reply [%p], uas_tran=0\n", dlg);
+			if(sip_method == METHOD_UPDATE)
+				dlg->update_tran = NULL;
+			else
+				dlg->uas_tran = NULL;
 		}
-		LM_DBG("Reset transaction- send final reply [%p], uas_tran=0\n", dlg);
-		if(sip_method == METHOD_UPDATE)
-			dlg->update_tran = NULL;
-		else
-			dlg->uas_tran = NULL;
 	}
 
 	msg = tm_tran->uas.request;
@@ -1799,12 +1896,14 @@ int _b2b_send_reply(b2b_dlg_t* dlg, b2b_rpl_data_t* rpl_data)
 			 * callbacks is not neccesary unless we have replication */
 			b2be_cluster) {
 			b2b_ev = B2B_EVENT_CREATE;
-			b2b_run_cb(dlg, hash_index, et, B2BCB_TRIGGER_EVENT, b2b_ev, &storage,
-				serialize_backend);
+			if (b2b_run_cb(dlg, hash_index, et, B2BCB_TRIGGER_EVENT, b2b_ev,
+				&storage, serialize_backend) != 0)
+				goto error;
 		} else if (prev_state == B2B_MODIFIED && dlg->state == B2B_CONFIRMED) {
 			b2b_ev = B2B_EVENT_UPDATE;
-			b2b_run_cb(dlg, hash_index, et, B2BCB_TRIGGER_EVENT, b2b_ev, &storage,
-				serialize_backend);
+			if (b2b_run_cb(dlg, hash_index, et, B2BCB_TRIGGER_EVENT, b2b_ev,
+				&storage, serialize_backend) != 0)
+				goto error;
 		}
 	}
 
@@ -1857,8 +1956,12 @@ int _b2b_send_reply(b2b_dlg_t* dlg, b2b_rpl_data_t* rpl_data)
 	}
 	if(code >= 200)
 	{
-		LM_DBG("Sent reply [%d] and unreffed the cell %p\n", code, tm_tran);
-		tmb.unref_cell(tm_tran);
+		if (sip_method != METHOD_INVITE) {
+			LM_DBG("Sent reply [%d] and unreffed the cell %p\n", code, tm_tran);
+			tmb.unref_cell(tm_tran);
+		} else {
+			LM_DBG("Sent reply [%d] without unreffing the cell %p\n", code, tm_tran);
+		}
 	}
 	else
 	{
@@ -1869,7 +1972,12 @@ int _b2b_send_reply(b2b_dlg_t* dlg, b2b_rpl_data_t* rpl_data)
 error:
 	if(code >= 200)
 	{
-		tmb.unref_cell(tm_tran);
+		if (sip_method != METHOD_INVITE) {
+			LM_DBG("Sent reply [%d] and unreffed the cell %p\n", code, tm_tran);
+			tmb.unref_cell(tm_tran);
+		} else {
+			LM_DBG("Sent reply [%d] without unreffing the cell %p\n", code, tm_tran);
+		}
 	}
 	return -1;
 }
@@ -1913,6 +2021,9 @@ void b2b_delete_record(b2b_dlg_t* dlg, b2b_table htable, unsigned int hash_index
 	if (b2be_db_mode == WRITE_BACK && dlg->storage.s)
 		shm_free(dlg->storage.s);
 
+	if(dlg->prack_tran)
+		tmb.unref_cell(dlg->prack_tran);
+
 	if(dlg->uac_tran)
 		tmb.unref_cell(dlg->uac_tran);
 
@@ -1948,6 +2059,9 @@ void b2b_delete_record(b2b_dlg_t* dlg, b2b_table htable, unsigned int hash_index
 	if(dlg->ack_sdp.s)
 		shm_free(dlg->ack_sdp.s);
 
+	if(dlg->prack_headers.s)
+		shm_free(dlg->prack_headers.s);
+
 	if (dlg->free_param)
 		dlg->free_param(dlg->param);
 
@@ -1969,7 +2083,7 @@ void b2b_entity_delete(enum b2b_entity_type et, str* b2b_key,
 		table = client_htable;
 
 	/* parse the key and find the position in hash table */
-	if(b2b_parse_key(b2b_key, &hash_index, &local_index, NULL) < 0)
+	if(b2b_parse_key(b2b_key, &hash_index, &local_index) < 0)
 	{
 		LM_ERR("Wrong format for b2b key\n");
 		return;
@@ -1993,8 +2107,11 @@ void b2b_entity_delete(enum b2b_entity_type et, str* b2b_key,
 
 	if (B2BE_SERIALIZE_STORAGE() && replicate) {
 		trig_ev = 1;
-		b2b_run_cb(dlg, hash_index, et, B2BCB_TRIGGER_EVENT, B2B_EVENT_DELETE,
-			&storage, serialize_backend);
+		if (b2b_run_cb(dlg, hash_index, et, B2BCB_TRIGGER_EVENT,
+			B2B_EVENT_DELETE, &storage, serialize_backend) != 0) {
+			lock_release(&table[hash_index].lock);
+			return;
+		}
 	}
 
 	if(db_del)
@@ -2049,7 +2166,7 @@ int b2b_entity_exists(enum b2b_entity_type et, str* b2b_key)
 		table = client_htable;
 
 	/* parse the key and find the position in hash table */
-	if(b2b_parse_key(b2b_key, &hash_index, &local_index, NULL) < 0)
+	if(b2b_parse_key(b2b_key, &hash_index, &local_index) < 0)
 	{
 		LM_ERR("Wrong format for b2b key\n");
 		return 0;
@@ -2236,7 +2353,7 @@ int _b2b_send_request(b2b_dlg_t* dlg, b2b_req_data_t* req_data)
 	}
 
 	/* parse the key and find the position in hash table */
-	if(b2b_parse_key(b2b_key, &hash_index, &local_index, NULL) < 0)
+	if(b2b_parse_key(b2b_key, &hash_index, &local_index) < 0)
 	{
 		LM_ERR("Wrong format for b2b key [%.*s]\n", b2b_key->len, b2b_key->s);
 		return -1;
@@ -2289,6 +2406,17 @@ int _b2b_send_request(b2b_dlg_t* dlg, b2b_req_data_t* req_data)
 		goto error;
 	}
 
+
+	if (method_value == METHOD_PRACK && dlg->prack_headers.s)
+	{
+
+	    memmove(ehdr.s + dlg->prack_headers.len, ehdr.s, ehdr.len);
+	    memcpy(ehdr.s, dlg->prack_headers.s, dlg->prack_headers.len);
+	    ehdr.len = ehdr.len + dlg->prack_headers.len;
+
+	    LM_ERR("METHOD_PRACK ehdr %d[%.*s]\n", ehdr.len ,ehdr.len, ehdr.s);
+	}
+
 	if(dlg->state < B2B_CONFIRMED)
 	{
 		if(method_value == METHOD_BYE && et==B2B_CLIENT) /* send CANCEL*/
@@ -2329,6 +2457,7 @@ int _b2b_send_request(b2b_dlg_t* dlg, b2b_req_data_t* req_data)
 			if(dlg->uac_tran)
 			{
 				struct cell *inv_t;
+				struct cell *bk_t = tmb.t_gett();
 				LM_DBG("send cancel request\n");
 				if (tmb.t_lookup_ident( &inv_t, dlg->uac_tran->hash_index,
 				dlg->uac_tran->label) != 1) {
@@ -2338,6 +2467,7 @@ int _b2b_send_request(b2b_dlg_t* dlg, b2b_req_data_t* req_data)
 				// FIXME - tracing: how do we get to the cancel transaction?
 				ret = tmb.t_cancel_trans( inv_t, &ehdr);
 				tmb.unref_cell(inv_t);
+				tmb.t_sett(bk_t);
 				if (dlg->state > B2B_CONFIRMED)
 					method_value = METHOD_INVITE;
 			}
@@ -2372,13 +2502,15 @@ int _b2b_send_request(b2b_dlg_t* dlg, b2b_req_data_t* req_data)
 		if (dlg->state == B2B_ESTABLISHED) {
 			if (b2be_db_mode != NO_DB || dlg->replicated) {
 				b2b_ev = B2B_EVENT_ACK;
-				b2b_run_cb(dlg, hash_index, et, B2BCB_TRIGGER_EVENT, b2b_ev, &storage,
-					serialize_backend);
+				if (b2b_run_cb(dlg, hash_index, et, B2BCB_TRIGGER_EVENT,
+					b2b_ev, &storage, serialize_backend) != 0)
+					goto error;
 			}
 		} else if (dlg->state == B2B_TERMINATED) {
 			b2b_ev = B2B_EVENT_DELETE;
-			b2b_run_cb(dlg, hash_index, et, B2BCB_TRIGGER_EVENT, b2b_ev, &storage,
-				serialize_backend);
+			if (b2b_run_cb(dlg, hash_index, et, B2BCB_TRIGGER_EVENT, b2b_ev,
+				&storage, serialize_backend) != 0)
+				goto error;
 		}
 	}
 
@@ -2768,7 +2900,7 @@ void b2b_tm_cback(struct cell *t, b2b_table htable, struct tmcb_params *ps)
 	static struct authenticate_nc_cnonce auth_nc_cnonce;
 	struct digest_auth_response response;
 	str *new_hdr;
-	char status_buf[INT2STR_MAX_LEN];
+	char dummy_fl_buf[7/*SIP/2.0*/ + 1 + 3/*statuscode*/ + 1 + 7/*Timeout*/];
 	static str sdp_ct = str_init("Content-Type: application/sdp\r\n");
 	int old_route_type;
 	bin_packet_t storage;
@@ -2804,7 +2936,7 @@ void b2b_tm_cback(struct cell *t, b2b_table htable, struct tmcb_params *ps)
 	msg = ps->rpl;
 	b2b_key = (str*)*ps->param;
 
-	if(b2b_parse_key(b2b_key, &hash_index, &local_index, NULL)< 0)
+	if(b2b_parse_key(b2b_key, &hash_index, &local_index)< 0)
 	{
 		LM_ERR("Failed to parse b2b logic key [%.*s]\n",b2b_key->len,b2b_key->s);
 		return;
@@ -2915,6 +3047,7 @@ void b2b_tm_cback(struct cell *t, b2b_table htable, struct tmcb_params *ps)
 	}
 	else
 	{
+		/* coverity[var_deref_model] */
 		dlg = b2b_search_htable_dlg(htable, hash_index, local_index,
 			&from_tag, (method_id==METHOD_CANCEL)?NULL:&to_tag, &callid);
 	}
@@ -2969,6 +3102,7 @@ void b2b_tm_cback(struct cell *t, b2b_table htable, struct tmcb_params *ps)
 			"transaction [%p]\n", dlg, dlg->uac_tran, t);
 		if(dlg_based_search)
 			/* coverity[swapped_arguments] */
+			/* coverity[var_deref_model] */
 			dlg = b2b_search_htable_next_dlg( previous_dlg, htable, hash_index,
 				local_index, &from_tag, &to_tag, &callid);
 		else
@@ -3141,10 +3275,10 @@ void b2b_tm_cback(struct cell *t, b2b_table htable, struct tmcb_params *ps)
 					B2BE_LOCK_RELEASE(htable, hash_index);
 
 					/* run the b2b route */
-					if(reply_routeid > 0) {
+					if(ref_script_route_is_valid(reply_route_ref)) {
 						msg->flags = t->uac[0].br_flags;
 						swap_route_type(old_route_type, ONREPLY_ROUTE);
-						run_top_route(sroutes->request[reply_routeid], msg);
+						run_top_route(sroutes->request[reply_route_ref->idx], msg);
 						set_route_type(old_route_type);
 						b2b_apply_lumps(msg);
 					}
@@ -3169,12 +3303,23 @@ dummy_reply:
 			memset(&dummy_msg, 0, sizeof(struct sip_msg));
 			dummy_msg.id = 1;
 			dummy_msg.first_line.type = SIP_REPLY;
-			dummy_msg.first_line.u.reply.statuscode = statuscode;
-			dummy_msg.first_line.u.reply.status.s =
-				int2bstr( statuscode, status_buf,
-				&dummy_msg.first_line.u.reply.status.len);
-			dummy_msg.first_line.u.reply.reason.s = "Timeout";
+
+			memcpy(dummy_fl_buf, "SIP/2.0", 7);
+			dummy_msg.first_line.u.reply.version.s = dummy_fl_buf;
+			dummy_msg.first_line.u.reply.version.len = 7;
+			dummy_fl_buf[7] = ' ';
+
+			rctostr(dummy_fl_buf+8, statuscode);
+			dummy_msg.first_line.u.reply.status.s = dummy_fl_buf+8;
+			dummy_msg.first_line.u.reply.status.len = 3;
+			dummy_fl_buf[11] = ' ';
+
+			memcpy(dummy_fl_buf+12, "Timeout", 7);
+			dummy_msg.first_line.u.reply.reason.s = dummy_fl_buf+12;
 			dummy_msg.first_line.u.reply.reason.len = 7;
+
+			dummy_msg.first_line.u.reply.statuscode = statuscode;
+
 			memset(&cb, 0, sizeof(struct cseq_body));
 			memset(&cseq, 0, sizeof(struct hdr_field));
 			cb.method = t->method;
@@ -3352,51 +3497,63 @@ dummy_reply:
 					}
 					UPDATE_DBFLAG(dlg);
 				}
-				if (!passthru_prack)
+
+				/* PRACK handling
+				   If "Require: 100rel" header is set, there are couple ways we can handle this:
+				   If passthru_prack is set, we'll store the RAck header for when a response PRACK comes.
+				   Otherwise, we'll send a PRACK ourselves. */
+				hdr = get_header_by_static_name( msg, "Require");
+				while(hdr)
 				{
-					/* PRACK handling */
-					/* if the provisional reply contains a
-					* Require: 100rel header -> send PRACK */
-					hdr = get_header_by_static_name( msg, "Require");
-					while(hdr)
-					{
-						LM_DBG("Found require hdr\n");
-						parse_supported_body(&(hdr->body), &reqmask);
-						if (reqmask & F_SUPPORTED_100REL) {
-							LM_DBG("Found 100rel header\n");
-							break;
-						}					
-						hdr = hdr->sibling;
+					LM_DBG("Found require hdr\n");
+					parse_supported_body(&(hdr->body), &reqmask);
+					if (reqmask & F_SUPPORTED_100REL) {
+						LM_DBG("Found 100rel header\n");
+						break;
 					}
-					if(hdr)
+					hdr = hdr->sibling;
+				}
+				if(hdr)
+				{
+					str method={"PRACK", 5};
+					str extra_headers;
+					char buf[128];
+					str rseq, cseq;
+					hdr = get_header_by_static_name( msg, "RSeq");
+					if(!hdr)
 					{
-						str method={"PRACK", 5};
-						str extra_headers;
-						char buf[128];
-						str rseq, cseq;
-
-						hdr = get_header_by_static_name( msg, "RSeq");
-						if(!hdr)
-						{
-							LM_ERR("RSeq header not found\n");
-							goto error;
+						LM_ERR("RSeq header not found\n");
+						goto error;
+					}
+					rseq = hdr->body;
+					cseq = msg->cseq->body;
+					trim_trailing(&rseq);
+					trim_trailing(&cseq);
+					sprintf(buf, "RAck: %.*s %.*s\r\n",
+							rseq.len, rseq.s, cseq.len, cseq.s);
+					extra_headers.s = buf;
+					extra_headers.len = strlen(buf);
+					if (passthru_prack)
+					{
+						/* Store the RAck header for when a response PRACK comes */
+						if (dlg->prack_headers.s) {
+							shm_free(dlg->prack_headers.s);
 						}
-						rseq = hdr->body;
-						cseq = msg->cseq->body;
-						trim_trailing(&rseq);
-						trim_trailing(&cseq);
-						sprintf(buf, "RAck: %.*s %.*s\r\n",
-								rseq.len, rseq.s, cseq.len, cseq.s);
-						extra_headers.s = buf;
-						extra_headers.len = strlen(buf);
-
+						dlg->prack_headers.s = shm_malloc(extra_headers.len);
+						memcpy(dlg->prack_headers.s, extra_headers.s, extra_headers.len);
+						dlg->prack_headers.len = extra_headers.len;
+						LM_ERR("dlg->prack_headers %d[%.*s]\n", dlg->prack_headers.len ,dlg->prack_headers.len, dlg->prack_headers.s);
+					}
+					else
+					{
+					        /* Let's respond with a PRACK straight away */
 						if(dlg->callid.s==0 || dlg->callid.len==0)
 							dlg->callid = msg->callid->body;
 						if(b2b_send_req(dlg, etype, leg, &method, &extra_headers, 0) < 0)
 						{
 							LM_ERR("Failed to send PRACK\n");
 						}
-					}
+				       }
 				}
 				goto done;
 			}
@@ -3499,10 +3656,10 @@ done:
 	/* I have to inform the logic that a reply was received */
 done1:
 	/* run the b2b route */
-	if(reply_routeid > 0) {
+	if(ref_script_route_is_valid(reply_route_ref)) {
 		msg->flags = t->uac[0].br_flags;
 		swap_route_type(old_route_type, ONREPLY_ROUTE);
-		run_top_route(sroutes->request[reply_routeid], msg);
+		run_top_route(sroutes->request[reply_route_ref->idx], msg);
 		set_route_type(old_route_type);
 		if (msg != FAKED_REPLY) b2b_apply_lumps(msg);
 	}
@@ -3515,13 +3672,17 @@ done1:
 		else
 			ua_ev_type = UA_SESS_EV_REJECTED;
 
-		if (raise_ua_sess_event(b2b_key, etype, ua_ev_type, ua_flags, msg) < 0) {
+		if (raise_ua_sess_event(b2b_key, etype, ua_ev_type, ua_flags, msg, NULL) < 0) {
 			LM_ERR("Failed to raise E_UA_SESSION event\n");
 			goto error1;
 		}
 	} else {
-		b2b_cback(msg, b2b_key, B2B_REPLY, logic_key.s?&logic_key:0,
-			b2b_param, b2b_cb_flags);
+		if (!b2b_cback)
+			LM_DBG("calback not yet registered for [%.*s]\n",
+					(logic_key.s?logic_key.len:0), (logic_key.s?logic_key.s:""));
+		else
+			b2b_cback(msg, b2b_key, B2B_REPLY, logic_key.s?&logic_key:0,
+				b2b_param, b2b_cb_flags);
 		if(logic_key.s)
 		{
 			pkg_free(logic_key.s);
@@ -3543,16 +3704,22 @@ b2b_route:
 
 			if (dlg->state != B2B_TERMINATED) {
 				b2b_ev = B2B_EVENT_UPDATE;
-				b2b_run_cb(dlg, hash_index, etype, B2BCB_TRIGGER_EVENT, b2b_ev,
-					&storage, serialize_backend);
+				if (b2b_run_cb(dlg, hash_index, etype, B2BCB_TRIGGER_EVENT,
+					b2b_ev, &storage, serialize_backend) != 0) {
+					lock_release(&htable[hash_index].lock);
+					return;
+				}
 			} else {
 				b2b_ev = -1;
 			}
 		} else if (b2b_ev == B2B_EVENT_CREATE) {
 
 			if (dlg->state != B2B_TERMINATED) {
-				b2b_run_cb(dlg, hash_index, etype, B2BCB_TRIGGER_EVENT, b2b_ev,
-					&storage, serialize_backend);
+				if (b2b_run_cb(dlg, hash_index, etype, B2BCB_TRIGGER_EVENT,
+					b2b_ev, &storage, serialize_backend) != 0) {
+					lock_release(&htable[hash_index].lock);
+					return;
+				}
 
 				if (b2be_db_mode == WRITE_THROUGH)
 					b2be_db_insert(dlg, etype);

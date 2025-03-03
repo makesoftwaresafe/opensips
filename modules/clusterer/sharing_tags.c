@@ -596,6 +596,29 @@ int shtag_set_sync_status(str *tag_name, int cluster_id, str *capability,
 	return 0;
 }
 
+void update_shtags_sync_status_cap(int cluster_id, struct local_cap *new_caps)
+{
+	struct sharing_tag *tag;
+	struct shtag_sync_status *status;
+	struct local_cap *cap;
+
+	lock_start_write(shtags_lock);
+
+	for (tag = *shtags_list; tag; tag = tag->next) {
+		if (tag->cluster_id != cluster_id)
+			continue;
+
+		for (status=tag->sync_status; status; status=status->next)
+			for (cap = new_caps; cap; cap = cap->next)
+				if (!str_strcmp(&cap->reg.name, &status->capability->reg.name)) {
+					status->capability = cap;
+					break;
+				}
+	}
+
+	lock_stop_write(shtags_lock);
+}
+
 int shtag_sync_all_backup(int cluster_id, str *capability)
 {
 	struct sharing_tag *tag;
@@ -693,6 +716,10 @@ int shtag_activate(str *tag_name, int cluster_id, char *reason, int reason_len)
 	}
 
 	/* inform the other nodes that we are active now */
+
+	if (!tag)
+		goto stop;
+
 	for (node = cl->node_list; node; node = node->next) {
 		if (tag->send_active_msg)
 			for (ni = tag->active_msgs_sent;
@@ -716,13 +743,14 @@ int shtag_activate(str *tag_name, int cluster_id, char *reason, int reason_len)
 				return ret;
 			}
 			ni->node_id = node->node_id;
-			ni->next = tag->active_msgs_sent;
 			lock_switch_write(shtags_lock, lock_old_flag);
+			ni->next = tag->active_msgs_sent;
 			tag->active_msgs_sent = ni;
 			lock_switch_read(shtags_lock, lock_old_flag);
 		}
 	}
 
+stop:
 	lock_stop_sw_read(shtags_lock);
 
 	/* do we have a transition from BACKUP to ACTIVE? */
@@ -793,8 +821,8 @@ void shtag_flush_state(int c_id, int node_id)
 				return;
 			}
 			ni->node_id = node_id;
-			ni->next = tag->active_msgs_sent;
 			lock_switch_write(shtags_lock, lock_old_flag);
+			ni->next = tag->active_msgs_sent;
 			tag->active_msgs_sent = ni;
 			lock_switch_read(shtags_lock, lock_old_flag);
 		}

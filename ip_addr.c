@@ -38,9 +38,9 @@
 #include "dprint.h"
 #include "mem/mem.h"
 
-char _ip_addr_A_buff[IP_ADDR_MAX_STR_SIZE];
+char _ip_addr_A_buffs[IP_ADDR2STR_BUF_NO][IP_ADDR_MAX_STR_SIZE];
 
-struct net* mk_net(struct ip_addr* ip, struct ip_addr* mask)
+struct net* mk_net(const struct ip_addr* ip, struct ip_addr* mask)
 {
 	struct net* n;
 	int warning;
@@ -78,7 +78,7 @@ error:
 
 
 
-struct net* mk_net_bitlen(struct ip_addr* ip, unsigned int bitlen)
+struct net* mk_net_bitlen(const struct ip_addr* ip, unsigned int bitlen)
 {
 	struct ip_addr mask;
 	unsigned int r;
@@ -100,7 +100,7 @@ error:
 
 
 
-void print_ip(char* p, struct ip_addr* ip, char *s)
+void print_ip(char* p, const struct ip_addr* ip, char *s)
 {
 	switch(ip->af){
 		case AF_INET:
@@ -169,7 +169,7 @@ void print_net(struct net* net)
 }
 
 
-int ip_addr_is_1918(str *s_ip)
+int ip_addr_is_1918(str *s_ip, int check_rfc_6333)
 {
 	static struct {
 		uint32_t netaddr;
@@ -180,11 +180,15 @@ int ip_addr_is_1918(str *s_ip)
 		{ 0xc0a80000, 0xffffffffu << 16},  /* "192.168.0.0" RFC 1918 */
 		{ 0x64400000, 0xffffffffu << 22},  /* "100.64.0.0"  RFC 6598 */
 		{ 0x7f000000, 0xffffffffu << 24},  /* "127.0.0.0"   RFC 1122 */
+		{ 0xc0000000, 0xffffffffu << 3},   /* "192.0.0.0"   RFC 6333 */
 		{ 0, 0}
 	};
 	struct ip_addr *ip;
 	uint32_t netaddr;
 	int i;
+
+	if (!check_rfc_6333)
+		nets_1918[5].netaddr = 0;
 
 	/* is it an IPv4 address? */
 	if ( (ip=str2ip(s_ip))==NULL )

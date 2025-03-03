@@ -91,7 +91,7 @@ AV *keys2perlarray(db_key_t* keys, int n) {
 	return array;
 }
 
-inline SV *valdata(db_val_t* val) {
+static inline SV *valdata(db_val_t* val) {
 	SV *data = &PL_sv_undef;
 	const char* stringval;
 
@@ -121,7 +121,7 @@ inline SV *valdata(db_val_t* val) {
 			break;
 
 		case DB_DATETIME:
-			data = newSViv((unsigned int)VAL_TIME(val));
+			data = newSViv((unsigned int)(unsigned long)VAL_TIME(val));
 			break;
 
 		case DB_BLOB:

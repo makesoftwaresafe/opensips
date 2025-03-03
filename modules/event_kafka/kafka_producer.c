@@ -313,6 +313,8 @@ static int kafka_enq_msg(kafka_job_t *job)
 		} else {
 			LM_DBG("Enqueued message for topic: %s\n", prod->conf_strings->next->s);
 		}
+
+	/* coverity[overflow_const: FALSE] - when retries = 0 the while loop stops */
 	} while (rc < 0 && retries-- > 0);
 
 	return rc;
@@ -377,6 +379,7 @@ void kafka_report_status(int sender, void *param)
 {
 	struct kafka_report_param *p =
 		(struct kafka_report_param *)param;
+	script_job_data_t *job_data;
 
 	if (p->job->type == KAFKA_JOB_EVI) {
 		evi_job_data_t *job_data = (evi_job_data_t *)p->job->data;
@@ -384,10 +387,14 @@ void kafka_report_status(int sender, void *param)
 		job_data->evi_async_ctx.status_cb(job_data->evi_async_ctx.cb_param,
 			p->status);
 	} else {
-		script_job_data_t *job_data = (script_job_data_t *)p->job->data;
 		struct sip_msg *req;
 		struct usr_avp **old_avps;
 		struct usr_avp *report_avps;
+
+		job_data = (script_job_data_t *)p->job->data;
+
+		if (!ref_script_route_check_and_update(job_data->report_rt))
+			goto free;
 
 		req = get_dummy_sip_msg();
 		if (!req) {
@@ -403,7 +410,7 @@ void kafka_report_status(int sender, void *param)
 		old_avps = set_avp_list(&report_avps);
 
 		set_route_type(REQUEST_ROUTE);
-		run_top_route(sroutes->request[job_data->report_rt_idx], req);
+		run_top_route(sroutes->request[job_data->report_rt->idx], req);
 
 		set_avp_list(old_avps);
 		destroy_avp_list(&report_avps);
@@ -412,6 +419,8 @@ void kafka_report_status(int sender, void *param)
 	}
 
 free:
+	if (p->job->type == KAFKA_JOB_SCRIPT && job_data->report_rt)
+		shm_free(job_data->report_rt);
 	shm_free(p->job);
 	shm_free(p);
 }
@@ -423,7 +432,7 @@ static int kafka_dispatch_report(kafka_job_t *job, enum evi_status status)
 	if ((job->type == KAFKA_JOB_EVI &&
 		((evi_job_data_t *)job->data)->evi_async_ctx.status_cb == NULL) ||
 		(job->type == KAFKA_JOB_SCRIPT &&
-		((script_job_data_t *)job->data)->report_rt_idx == -1))
+		((script_job_data_t *)job->data)->report_rt == NULL))
 		/* no reporting required */
 		return 1;
 
@@ -665,6 +674,10 @@ static int handle_io(struct fd_map *fm, int idx, int event_type)
 
 void kafka_process(int rank)
 {
+	/* suppress the E_CORE_LOG event for new logs while handling
+	 * the event itself */
+	suppress_proc_log_event();
+
 	signal(SIGTERM, sig_handler);
 
 	if (init_worker_reactor("Kafka worker", RCT_PRIO_MAX) != 0) {
@@ -683,5 +696,6 @@ void kafka_process(int rank)
 
 out_err:
 	destroy_io_wait(&_worker_io);
+	reset_proc_log_event();
 	abort();
 }

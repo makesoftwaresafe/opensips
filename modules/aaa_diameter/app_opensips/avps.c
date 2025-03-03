@@ -50,9 +50,12 @@ extern int dm_store_enumval(const char *name, int value);
 #ifdef PKG_MALLOC
 #include "../../../dprint.h"
 #define LOG_DBG LM_DBG
+#define LOG_ERROR LM_ERR
 #else
 #define LOG_DBG fd_log_debug
+#define LOG_ERROR fd_log_error
 #endif
+
 
 #define STR_L(s) s, strlen(s)
 #define avp_type2str(t) ( \
@@ -468,7 +471,7 @@ int register_osips_avps(void)
 }
 
 
-int parse_avp_def(struct dm_avp_def *avps, int *avp_count, char *line, int len)
+static int parse_avp_def(struct dm_avp_def *avps, int *avp_count, char *line, int len)
 {
 	char *p = line, *avp_name;
 
@@ -477,7 +480,7 @@ int parse_avp_def(struct dm_avp_def *avps, int *avp_count, char *line, int len)
 	avps[*avp_count].name_len = p - avp_name;
 
 	if (avps[*avp_count].name_len > 64) {
-		printf("ERROR: AVP max name length exceeded (64)\n");
+		LOG_ERROR("AVP max name length exceeded (64)\n");
 		return -1;
 	}
 
@@ -521,7 +524,7 @@ int parse_avp_def(struct dm_avp_def *avps, int *avp_count, char *line, int len)
 		break;
 
 	default:
-		printf("ERROR: bad AVP flag in: '... | %s'\n", p);
+		LOG_ERROR("bad AVP flag in: '... | %s'\n", p);
 		goto error;
 	}
 
@@ -534,8 +537,8 @@ int parse_avp_def(struct dm_avp_def *avps, int *avp_count, char *line, int len)
 	while (isspace(*p)) { p++; len--; }
 
 	avps[*avp_count].max_repeats = (int)strtol(p, NULL, 10);
-	if (avps[*avp_count].max_repeats < 0) {
-		printf("ERROR: bad AVP max count: '... | %s'\n", p);
+	if (avps[*avp_count].max_repeats < -1) {
+		LOG_ERROR("bad AVP max count: '... | %s'\n", p);
 		goto error;
 	}
 
@@ -547,19 +550,20 @@ int parse_avp_def(struct dm_avp_def *avps, int *avp_count, char *line, int len)
 	return 0;
 
 error:
-	printf("ERROR: failed to parse line: '%s'\n", line);
+	LOG_ERROR("failed to parse line: '%s'\n", line);
 	return -1;
 }
-
 
 int parse_attr_def(char *line, FILE *fp)
 {
 	struct dm_avp_def avps[128];
 	int avp_count = 0;
+	unsigned int vendor_id = -1;
 	size_t buflen = strlen(line);
 	int i, len = buflen, attr_len = strlen("ATTRIBUTE"), name_len, avp_code;
 	char *name, *nt_name, *newp, *p = line, *end = p + len;
 	enum dict_avp_basetype avp_type;
+	enum dict_avp_enc_type enc_type = AVP_ENC_TYPE_NONE;
 
 	if (len < attr_len || strncasecmp(p, "ATTRIBUTE", attr_len))
 		return 1;
@@ -577,6 +581,10 @@ int parse_attr_def(char *line, FILE *fp)
 		goto error;
 
 	nt_name = malloc(name_len + 1);
+	if (!nt_name) {
+		LOG_ERROR("Malloc failed\n");
+		return -1;
+	}
 	memcpy(nt_name, name, name_len);
 	nt_name[name_len] = '\0';
 
@@ -596,7 +604,14 @@ int parse_attr_def(char *line, FILE *fp)
 	if (p >= end) {
 		avp_type = AVP_TYPE_OCTETSTRING;
 	} else {
-		if ((len >= strlen("utf8string") && !strncasecmp(p, STR_L("utf8string")))
+		if ((len >= strlen("ip") && !strncasecmp(p, STR_L("ip")))) {
+			avp_type = AVP_TYPE_OCTETSTRING;
+			enc_type = AVP_ENC_TYPE_IP;
+		} else if ((len >= strlen("hex") && !strncasecmp(p, STR_L("hex")))
+		        || (len >= strlen("hexstring") && !strncasecmp(p, STR_L("hexstring")))) {
+			avp_type = AVP_TYPE_OCTETSTRING;
+			enc_type = AVP_ENC_TYPE_HEX;
+		} else if ((len >= strlen("utf8string") && !strncasecmp(p, STR_L("utf8string")))
 		        || (len >= strlen("string") && !strncasecmp(p, STR_L("string"))))
 			avp_type = AVP_TYPE_OCTETSTRING;
 		else if ((len >= strlen("unsigned64") && !strncasecmp(p, STR_L("unsigned64"))))
@@ -617,6 +632,17 @@ int parse_attr_def(char *line, FILE *fp)
 			goto error;
 	}
 
+	/* skip over the type */
+	while (len > 0 && !isspace(*p)) { p++; len--; }
+
+	if (len > 0 && *p != '\r' && *p != '\n') {
+		vendor_id = strtol(p, &newp, 10);
+		if (vendor_id < 0)
+			goto error;
+
+		len -= newp - p;
+	}
+
 	if (avp_type != AVP_TYPE_GROUPED)
 		goto create_avp;
 
@@ -635,12 +661,14 @@ int parse_attr_def(char *line, FILE *fp)
 			goto create_avp;
 
 		if (avp_count >= 128) {
-			printf("ERROR: max AVP count exceeded (128)\n");
+			LOG_ERROR("max AVP count exceeded (128)\n");
+			free(nt_name);
 			return -1;
 		}
 
 		if (parse_avp_def(avps, &avp_count, p, len) != 0) {
-			printf("ERROR: failed to parse Grouped sub-AVP line: '%s'\n", line);
+			LOG_ERROR("failed to parse Grouped sub-AVP line: '%s'\n", line);
+			free(nt_name);
 			return -1;
 		}
 	}
@@ -648,23 +676,32 @@ int parse_attr_def(char *line, FILE *fp)
 create_avp:;
 	struct dict_object *parent, *avp_ref, **pref;
 
-	if (avp_type == AVP_TYPE_OCTETSTRING) {
+	if (enc_type != AVP_ENC_TYPE_NONE &&
+			dm_enc_add((vendor_id != -1?vendor_id:0), avp_code, enc_type) != 0) {
+		LOG_ERROR("failed to add encoding type\n");
+		free(nt_name);
+		return -1;
+	}
+
+	pref = NULL;
+	parent = NULL;
+	switch (avp_type) {
+	case AVP_TYPE_OCTETSTRING:
 		FD_CHECK_dict_search(DICT_TYPE, TYPE_BY_NAME, "UTF8String", &parent);
-		pref = NULL;
-	} else if (avp_type == AVP_TYPE_GROUPED) {
-		parent = NULL;
+		break;
+	case AVP_TYPE_GROUPED:
 		pref = &avp_ref;
-	} else {
-		parent = NULL;
-		pref = NULL;
+		break;
+	default:
+		break;
 	}
 
 	struct dict_avp_data data = {
 		avp_code, 	/* Code */
-		0,			/* Vendor */
+		(vendor_id != -1?vendor_id:0),			/* Vendor */
 		nt_name,	/* Name */
 		AVP_FLAG_VENDOR | AVP_FLAG_MANDATORY, 	/* Fixed flags */
-		AVP_FLAG_MANDATORY,			/* Fixed flag values */
+		(vendor_id != -1?AVP_FLAG_VENDOR:0)|AVP_FLAG_MANDATORY, /* Fixed flag values */
 		avp_type 	/* base type of data */
 	};
 
@@ -675,36 +712,84 @@ create_avp:;
 			(avps[i].pos == RULE_FIXED_HEAD), -1, avps[i].max_repeats};
 
 		FD_CHECK(fd_dict_search(fd_g_config->cnf_dict,
-			DICT_AVP, AVP_BY_NAME, avps[i].name, &data.rule_avp, 0));
+			DICT_AVP, AVP_BY_NAME_ALL_VENDORS, avps[i].name, &data.rule_avp, 0));
 
 		if (!data.rule_avp) {
-			printf("ERROR: failed to locate AVP: %s\n", avps[i].name);
+			LOG_ERROR("failed to locate AVP: %s\n", avps[i].name);
 			return -1;
 		}
 
 		FD_CHECK_dict_new(DICT_RULE, &data, avp_ref, NULL);
 	}
 
-	LOG_DBG("registered custom AVP (%s, code %d, type %s, sub-avps: %d)\n",
-			nt_name, avp_code, avp_type2str(avp_type), avp_count);
+	LOG_DBG("registered custom AVP (%s, code %d, type %s, enc %s, sub-avps: %d, vendor: %d)\n",
+			nt_name, avp_code, avp_type2str(avp_type), enc_type2str(enc_type), avp_count, vendor_id);
 
 	free(nt_name);
 	return 0;
 error:
-	printf("ERROR: failed to parse line: %s\n", line);
+	LOG_ERROR("failed to parse line: %s\n", line);
+	free(nt_name);
 	return -1;
 }
 
+int parse_app_vendor(char *line, FILE *fp)
+{
+	unsigned int vendor_id = -1;
+	int len = strlen(line);
+	char *p = line, *newp, *vendor_name;
 
-unsigned int app_ids[64], n_app_ids;
+	if (len < strlen("VENDOR") || memcmp(p, "VENDOR", 6))
+		return 1;
+
+	p += 6;
+	len -= 6;
+
+	while (isspace(*p)) { p++; len--; }
+
+	vendor_id = (unsigned int)strtoul(p, &newp, 10);
+	if (vendor_id < 0) {
+		LOG_ERROR("bad Vendor ID: '... | %s'\n", p);
+		return -1;
+	}
+
+	len -= newp - p;
+	p = newp;
+
+	if (len <= 0) {
+		LOG_ERROR("empty Vendor Name not allowed\n");
+		return -1;
+	}
+
+	vendor_name = p;
+	p += len - 1;
+
+	while (p > vendor_name && isspace(*p)) { p--; }
+	*(++p) = '\0';
+
+	struct dict_vendor_data vendor_reg = {vendor_id, vendor_name};
+	FD_CHECK_dict_new(DICT_VENDOR, &vendor_reg, NULL, NULL);
+
+	LOG_DBG("registered Vendor %d (%s)\n", vendor_id, vendor_name);
+
+	return 1;
+}
+
+
+struct _app_defs app_defs[64];
+unsigned int n_app_ids;
+
 int parse_app_def(char *line, FILE *fp)
 {
 	unsigned int app_id = -1;
+	unsigned int vendor_id = -1;
+	unsigned char is_auth = 0;
 	int i, len = strlen(line);
 	char *p = line, *newp, *app_name;
+	struct dict_object *vendor_dict;
 
 	if (n_app_ids >= 64) {
-		printf("ERROR: max allowed Applications reached (64)\n");
+		LOG_ERROR("max allowed Applications reached (64)\n");
 		return -1;
 	}
 
@@ -716,9 +801,23 @@ int parse_app_def(char *line, FILE *fp)
 
 	while (isspace(*p)) { p++; len--; }
 
+	if (len >= strlen("-AUTH") && memcmp(p, "-AUTH", 5) == 0) {
+		is_auth = 1;
+
+		p += 5;
+		len -= 5;
+		while (isspace(*p)) { p++; len--; }
+	} else if (len >= strlen("-ACC") && memcmp(p, "-ACC", 4) == 0) {
+		is_auth = 0;
+
+		p += 4;
+		len -= 4;
+		while (isspace(*p)) { p++; len--; }
+	}
+
 	app_id = (unsigned int)strtoul(p, &newp, 10);
 	if (app_id < 0) {
-		printf("ERROR: bad Application ID: '... | %s'\n", p);
+		LOG_ERROR("bad Application ID: '... | %s'\n", p);
 		return -1;
 	}
 
@@ -726,9 +825,32 @@ int parse_app_def(char *line, FILE *fp)
 	p = newp;
 
 	while (isspace(*p)) { p++; len--; }
+	if (*p == '/') {
+
+		/* Vendor ID is specified as well */
+		p++;
+		len--;
+		while (isspace(*p)) { p++; len--; }
+
+		vendor_id = (unsigned int)strtoul(p, &newp, 10);
+		if (vendor_id < 0) {
+			LOG_ERROR("bad Vendor ID: '... | %s'\n", p);
+			return -1;
+		}
+
+		len -= newp - p;
+		p = newp;
+
+		while (isspace(*p)) { p++; len--; }
+
+		FD_CHECK_dict_search(DICT_VENDOR, VENDOR_BY_ID,
+				&vendor_id, &vendor_dict);
+	} else {
+		vendor_dict = NULL;
+	}
 
 	if (len <= 0) {
-		printf("ERROR: empty Application Name not allowed\n");
+		LOG_ERROR("empty Application Name not allowed\n");
 		return -1;
 	}
 
@@ -739,16 +861,18 @@ int parse_app_def(char *line, FILE *fp)
 	*(++p) = '\0';
 
 	struct dict_application_data app_reg = {app_id, app_name};
-	FD_CHECK_dict_new(DICT_APPLICATION, &app_reg, NULL, NULL);
+	FD_CHECK_dict_new(DICT_APPLICATION, &app_reg, vendor_dict, NULL);
 
 	LOG_DBG("registered Application %d (%s)\n", app_id, app_name);
 
 	/* store the App ID so OpenSIPS can register a reply cb later */
 	for (i = 0; i < n_app_ids; i++)
-		if (app_ids[i] == app_id)
+		if (app_defs[i].id == app_id)
 			return 1;
 
-	app_ids[n_app_ids++] = app_id;
+	app_defs[n_app_ids].auth = is_auth;
+	app_defs[n_app_ids].vendor = vendor_id;
+	app_defs[n_app_ids++].id = app_id;
 	return 1;
 }
 
@@ -784,7 +908,7 @@ int parse_command_def(char *line, FILE *fp, int cmd_type)
 
 	cmd_code = (unsigned int)strtoul(p, &newp, 10);
 	if (cmd_code < 0) {
-		printf("ERROR: bad AVP cmd code: '... | %s'\n", p);
+		LOG_ERROR("bad AVP cmd code: '... | %s'\n", p);
 		return -1;
 	}
 
@@ -801,7 +925,7 @@ int parse_command_def(char *line, FILE *fp, int cmd_type)
 
 	cmd_name_len = p - bkp;
 	if (cmd_name_len > 128) {
-		printf("ERROR: max Command Name length exceeded (128)\n");
+		LOG_ERROR("max Command Name length exceeded (128)\n");
 		return -1;
 	}
 
@@ -823,12 +947,12 @@ int parse_command_def(char *line, FILE *fp, int cmd_type)
 			goto define_req;
 
 		if (avp_count >= 128) {
-			printf("ERROR: max AVP count exceeded (128)\n");
+			LOG_ERROR("max AVP count exceeded (128)\n");
 			return -1;
 		}
 
 		if (parse_avp_def(avps, &avp_count, p, len) != 0) {
-			printf("ERROR: failed to parse Command AVP line: '%s'\n", line);
+			LOG_ERROR("failed to parse Command AVP line: '%s'\n", line);
 			return -1;
 		}
 	}
@@ -852,10 +976,10 @@ define_req:
 			(avps[i].pos == RULE_FIXED_HEAD), -1, avps[i].max_repeats};
 
 		FD_CHECK(fd_dict_search(fd_g_config->cnf_dict,
-			DICT_AVP, AVP_BY_NAME, avps[i].name, &data.rule_avp, 0));
+			DICT_AVP, AVP_BY_NAME_ALL_VENDORS, avps[i].name, &data.rule_avp, 0));
 
 		if (!data.rule_avp) {
-			printf("ERROR: failed to locate AVP: %s\n", avps[i].name);
+			LOG_ERROR("failed to locate AVP: %s\n", avps[i].name);
 			return -1;
 		}
 
@@ -863,33 +987,43 @@ define_req:
 	}
 
 	{
-		/* all custom requests and replies MUST include Transaction-Id */
+		/* all custom requests and replies MUST include Transaction-Id
+		 * but only if they they don't require a Session-Id already */
 		struct dict_rule_data data = {NULL, RULE_REQUIRED, 0, -1, 1};
 
 		FD_CHECK(fd_dict_search(fd_g_config->cnf_dict,
-			DICT_AVP, AVP_BY_NAME, "Transaction-Id", &data.rule_avp, 0));
-
+			DICT_AVP, AVP_BY_NAME, "Session-Id", &data.rule_avp, 0));
 		if (!data.rule_avp) {
-			printf("ERROR: failed to locate Transaction-Id AVP\n");
-			return -1;
-		}
+			FD_CHECK(fd_dict_search(fd_g_config->cnf_dict,
+				DICT_AVP, AVP_BY_NAME, "Transaction-Id", &data.rule_avp, 0));
 
-		FD_CHECK_dict_new(DICT_RULE, &data, cmd, NULL);
+			if (!data.rule_avp) {
+				LOG_ERROR("failed to locate Transaction-Id AVP\n");
+				return -1;
+			}
+
+			FD_CHECK_dict_new(DICT_RULE, &data, cmd, NULL);
+		}
 	}
 
-	/* all replies MUST include a Result-Code */
+	/* all replies MUST include a Result-Code
+	 * but only if they they don't require an Experimental-Result already */
 	if (cmd_type == CMD_ANSWER) {
 		struct dict_rule_data data = {NULL, RULE_REQUIRED, 0, -1, 1};
 
 		FD_CHECK(fd_dict_search(fd_g_config->cnf_dict,
-			DICT_AVP, AVP_BY_NAME, "Result-Code", &data.rule_avp, 0));
-
+			DICT_AVP, AVP_BY_NAME, "Experimental-Result", &data.rule_avp, 0));
 		if (!data.rule_avp) {
-			printf("ERROR: failed to locate Result-Code AVP\n");
-			return -1;
-		}
+			FD_CHECK(fd_dict_search(fd_g_config->cnf_dict,
+				DICT_AVP, AVP_BY_NAME, "Result-Code", &data.rule_avp, 0));
 
-		FD_CHECK_dict_new(DICT_RULE, &data, cmd, NULL);
+			if (!data.rule_avp) {
+				LOG_ERROR("failed to locate Result-Code AVP\n");
+				return -1;
+			}
+
+			FD_CHECK_dict_new(DICT_RULE, &data, cmd, NULL);
+		}
 	}
 
 	return 0;
@@ -920,6 +1054,14 @@ int parse_extra_avps(const char *extra_avps_file)
 		// comment or empty line
 		if (*p == '#' || p - line >= read)
 			continue;
+
+		rc = parse_app_vendor(p, fp);
+		if (rc < 0) {
+			ret = -1;
+			goto out;
+		} else if (rc == 0) {
+			continue;
+		}
 
 		rc = parse_attr_def(p, fp);
 		if (rc < 0) {
@@ -959,7 +1101,7 @@ int parse_extra_avps(const char *extra_avps_file)
 	}
 
 	if (answers_needed > 0) {
-		printf("ERROR: bad config file, at least one Diameter Answer "
+		LOG_ERROR("bad config file, at least one Diameter Answer "
 		       "definition is missing\n");
 		ret = -1;
 	}

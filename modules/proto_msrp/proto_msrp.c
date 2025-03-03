@@ -141,8 +141,8 @@ static int proto_msrp_init(struct proto_info *pi)
 	pi->tran.dst_attr		= tcp_conn_fcntl;
 
 	pi->net.flags			= PROTO_NET_USE_TCP;
-	pi->net.read			= (proto_net_read_f)msrp_read_req;
-	pi->net.conn_init		= NULL;
+	pi->net.stream.read		= msrp_read_req;
+	pi->net.stream.conn.init	= NULL;
 	pi->net.report			= msrp_report;
 
 	return 0;
@@ -158,13 +158,13 @@ static int proto_msrps_init(struct proto_info *pi)
 	pi->tran.dst_attr		= tcp_conn_fcntl;
 
 	pi->net.flags			= PROTO_NET_USE_TCP;
-	pi->net.read			= (proto_net_read_f)msrp_read_req;
-	pi->net.conn_init		= proto_msrps_conn_init;
-	pi->net.conn_clean		= proto_msrps_conn_clean;
+	pi->net.stream.read		= msrp_read_req;
+	pi->net.stream.conn.init	= proto_msrps_conn_init;
+	pi->net.stream.conn.clean	= proto_msrps_conn_clean;
 	if (msrp_check_cert_on_reusage)
-		pi->net.conn_match	= msrps_conn_extra_match;
+		pi->net.stream.conn.match	= msrps_conn_extra_match;
 	else
-		pi->net.conn_match	= NULL;
+		pi->net.stream.conn.match	= NULL;
 	pi->net.report			= msrps_report;
 
 	return 0;
@@ -235,9 +235,9 @@ static int mod_init(void)
 
 	*msrp_trace_is_on = msrp_trace_is_on_tmp;
 	if ( trace_filter_route ) {
-		msrp_trace_filter_route_id =
-			get_script_route_ID_by_name( trace_filter_route, sroutes->request,
-				RT_NO);
+		msrp_trace_filter_route =
+			ref_script_route_by_name( trace_filter_route, sroutes->request,
+				RT_NO, REQUEST_ROUTE, 0);
 	}
 
 #ifdef MSRP_SELF_TESTING

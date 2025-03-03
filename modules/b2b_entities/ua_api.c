@@ -58,7 +58,7 @@ static str evi_ua_sess_name = str_init("E_UA_SESSION");
 static evi_params_p evi_ua_sess_params;
 static evi_param_p evi_key_param, evi_ev_type_param, evi_ent_type_param,
 	evi_status_param, evi_reason_param, evi_method_param, evi_body_param,
-	evi_headers_param;
+	evi_headers_param, evi_extra_param;
 
 static str evi_key_pname = str_init("key");
 static str evi_ent_type_pname = str_init("entity_type");
@@ -68,6 +68,7 @@ static str evi_reason_pname = str_init("reason");
 static str evi_method_pname = str_init("method");
 static str evi_body_pname = str_init("body");
 static str evi_headers_pname = str_init("headers");
+static str evi_extra_pname = str_init("extra_params");
 
 int ua_evi_init(void)
 {
@@ -116,6 +117,10 @@ int ua_evi_init(void)
 		&evi_headers_pname);
 	if (evi_headers_param == NULL)
 		goto error;
+	evi_extra_param = evi_param_create(evi_ua_sess_params,
+		&evi_extra_pname);
+	if (evi_extra_param == NULL)
+		goto error;
 
 	return 0;
 error:
@@ -153,6 +158,7 @@ static int get_all_headers(struct sip_msg *msg, str *hdrs)
 
 /* indexed with the values from enum ua_sess_event_type */
 static str event_type_str[] = {
+	str_init("NEW"),
 	str_init("EARLY"),
 	str_init("ANSWERED"),
 	str_init("REJECTED"),
@@ -163,13 +169,14 @@ static str event_type_str[] = {
 static str entity_type_str[] = {str_init("UAS"), str_init("UAC")};
 
 int raise_ua_sess_event(str *key, enum b2b_entity_type ent_type,
-	enum ua_sess_event_type ev_type, unsigned int flags, struct sip_msg *msg)
+	enum ua_sess_event_type ev_type, unsigned int flags, struct sip_msg *msg, str *extra)
 {
 	str body = {0,0};
 	str hdrs = {0,0};
 	str method;
 	str *reason;
 	int statuscode;
+	str empty = STR_NULL;
 
 	if (evi_param_set_str(evi_key_param, key) < 0) {
 		LM_ERR("cannot set event parameter\n");
@@ -189,7 +196,7 @@ int raise_ua_sess_event(str *key, enum b2b_entity_type ent_type,
 	if (msg->first_line.type == SIP_REQUEST) {
 		method = msg->first_line.u.request.method;
 		statuscode = 0;
-		reason = &STR_NULL;
+		reason = &empty;
 	} else {
 		method = get_cseq(msg)->method;
 		statuscode = msg->first_line.u.reply.statuscode;
@@ -227,6 +234,11 @@ int raise_ua_sess_event(str *key, enum b2b_entity_type ent_type,
 
 	if (evi_param_set_str(evi_headers_param, &hdrs) < 0) {
 		LM_ERR("cannot set event parameter\n");
+		goto error;
+	}
+
+	if (evi_param_set_str(evi_extra_param, (extra?extra:&empty)) < 0) {
+		LM_ERR("cannot set event extra parameter\n");
 		goto error;
 	}
 
@@ -317,8 +329,10 @@ struct ua_sess_t_list *insert_ua_sess_tl(str *b2b_key, unsigned int timeout)
 				tl->next = tmp;
 				ua_dlg_timer->first = tl;
 			} else {
-				tmp->prev->next = tl;
-				tl->prev = tmp->prev;
+				if (tmp->prev) {
+					tmp->prev->next = tl;
+					tl->prev = tmp->prev;
+				}
 				tl->next = tmp;
 				tmp->prev = tl;
 			}
@@ -465,6 +479,9 @@ static struct ua_sess_init_params *ua_parse_flags(str *s)
 		case 'b':
 			params->flags |= UA_FL_PROVIDE_BODY;
 			break;
+		case 'n':
+			params->flags |= UA_FL_SUPPRESS_NEW;
+			break;
 		default:
 			LM_WARN("unknown option `%c'\n", s->s[st]);
 		}
@@ -556,7 +573,7 @@ int ua_send_reply(int et, str *b2b_key, int method, int code, str *reason,
 	b2b_dlg_t *dlg = NULL;
 	unsigned int hash_index, local_index;
 
-	if(b2b_parse_key(b2b_key, &hash_index, &local_index, NULL) < 0)
+	if(b2b_parse_key(b2b_key, &hash_index, &local_index) < 0)
 	{
 		LM_ERR("Wrong format for b2b key [%.*s]\n", b2b_key->len, b2b_key->s);
 		return -1;
@@ -613,7 +630,7 @@ int ua_send_request(int et, str *b2b_key, str *method, str *body,
 	b2b_dlg_t *dlg = NULL;
 	unsigned int hash_index, local_index;
 
-	if(b2b_parse_key(b2b_key, &hash_index, &local_index, NULL) < 0)
+	if(b2b_parse_key(b2b_key, &hash_index, &local_index) < 0)
 	{
 		LM_ERR("Wrong format for b2b key [%.*s]\n", b2b_key->len, b2b_key->s);
 		return -1;
@@ -667,7 +684,7 @@ int ua_entity_delete(int et, str* b2b_key, int db_del, int remove_tl)
 	b2b_dlg_t* dlg;
 
 	/* parse the key and find the position in hash table */
-	if(b2b_parse_key(b2b_key, &hash_index, &local_index, NULL) < 0)
+	if(b2b_parse_key(b2b_key, &hash_index, &local_index) < 0)
 	{
 		LM_ERR("Wrong format for b2b key\n");
 		return -1;
@@ -767,7 +784,7 @@ int b2b_ua_reply(struct sip_msg *msg, str *key, str *method, int *code,
 }
 
 int b2b_ua_server_init(struct sip_msg *msg, pv_spec_t *key_spec,
-	struct ua_sess_init_params *init_params)
+	struct ua_sess_init_params *init_params, str *extra)
 {
 	pv_value_t key_pval;
 	str *key_ret = NULL;
@@ -799,6 +816,13 @@ int b2b_ua_server_init(struct sip_msg *msg, pv_spec_t *key_spec,
 			LM_ERR("Unable to set tag pvar\n");
 			goto error;
 		}
+	}
+
+	if (!(init_params->flags&UA_FL_SUPPRESS_NEW) &&
+		raise_ua_sess_event(key_ret, B2B_SERVER, UA_SESS_EV_NEW,
+		init_params->flags, msg, extra) < 0) {
+		LM_ERR("Failed to raise E_UA_SESSION event\n");
+		goto error;
 	}
 
 	pkg_free(key_ret);
@@ -1035,16 +1059,9 @@ mi_response_t *b2b_ua_mi_reply(const mi_params_t *params,
 		return init_mi_param_error();
 	if (get_mi_int_param(params, "code", &code) < 0)
 		return init_mi_param_error();
-
-	switch (try_get_mi_string_param(params, "reason", &reason.s, &reason.len)) {
-	case 0:
-		break;
-	case -1:
-		reason.s = NULL;
-		break;
-	default:
+	if (get_mi_string_param(params, "reason", &reason.s, &reason.len) < 0)
 		return init_mi_param_error();
-	}
+
 	switch (try_get_mi_string_param(params, "body", &body.s, &body.len)) {
 	case 0:
 		break;
@@ -1077,9 +1094,8 @@ mi_response_t *b2b_ua_mi_reply(const mi_params_t *params,
 
 	parse_method(method.s, method.s+method.len, &method_value);
 
-	if (ua_send_reply(B2B_NONE, &key, method_value, code,
-		reason.s?&reason:NULL, body.s?&body:NULL,
-		content_type.s?&content_type:NULL,
+	if (ua_send_reply(B2B_NONE, &key, method_value, code, &reason,
+		body.s?&body:NULL, content_type.s?&content_type:NULL,
 		extra_headers.s?&extra_headers:NULL) < 0) {
 		LM_ERR("Failed to send reply\n");
 		return init_mi_error(500, MI_SSTR("Failed to send reply"));
@@ -1143,7 +1159,7 @@ mi_response_t *b2b_ua_session_list(const mi_params_t *params,
 	}
 
 	if (key.s) {
-		if(b2b_parse_key(&key, &hash_index, &local_index, NULL) < 0)
+		if(b2b_parse_key(&key, &hash_index, &local_index) < 0)
 		{
 			LM_ERR("Wrong format for b2b key [%.*s]\n", key.len, key.s);
 			return init_mi_error(400, MI_SSTR("Bad format for b2b key"));

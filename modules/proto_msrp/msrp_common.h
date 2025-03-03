@@ -58,7 +58,7 @@ extern int msrp_send_timeout;
 extern int msrp_tls_handshake_timeout;
 extern int msrp_max_msg_chunks;
 extern int *msrp_trace_is_on;
-extern int  msrp_trace_filter_route_id;
+extern struct script_route_ref*  msrp_trace_filter_route;
 extern trace_dest msrp_t_dst;
 extern struct msrp_req msrp_current_req;
 
@@ -84,9 +84,9 @@ extern struct tls_mgm_binds tls_mgm_api;
 
 void msrp_brief_parse_msg(struct msrp_req *r);
 
-int proto_msrp_send(struct socket_info* send_sock,
+int proto_msrp_send(const struct socket_info* send_sock,
 		char* buf, unsigned int len,
-		union sockaddr_union* to, unsigned int id);
+		const union sockaddr_union* to, unsigned int id);
 
 int msrp_read_req(struct tcp_connection* con, int* bytes_read);
 

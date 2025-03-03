@@ -83,6 +83,11 @@ static int cfg_validate(void);
 
 /*! \brief Fixup functions */
 static int domain_fixup(void** param);
+static int save_flags_fixup(void** param);
+static int save_flags_fixup_free(void** param);
+static int lookup_flags_fixup(void** param);
+static int lookup_flags_fixup_free(void** param);
+static int bflag_fixup(void** param);
 
 /*! \brief Functions */
 static int add_sock_hdr(struct sip_msg* msg, str *str);
@@ -141,7 +146,7 @@ struct tm_binds tmb;
 static const cmd_export_t cmds[] = {
 	{"save", (cmd_function)save, {
 		{CMD_PARAM_STR|CMD_PARAM_STATIC, domain_fixup, 0},
-		{CMD_PARAM_STR|CMD_PARAM_OPT,0,0},
+		{CMD_PARAM_STR|CMD_PARAM_OPT, save_flags_fixup, save_flags_fixup_free},
 		{CMD_PARAM_STR|CMD_PARAM_OPT,0,0},
 		{CMD_PARAM_STR|CMD_PARAM_OPT,0,0}, {0,0,0}},
 		REQUEST_ROUTE|ONREPLY_ROUTE},
@@ -150,7 +155,8 @@ static const cmd_export_t cmds[] = {
 		{CMD_PARAM_STR, 0, 0},
 		{CMD_PARAM_STR|CMD_PARAM_OPT,0,0},
 		{CMD_PARAM_STR|CMD_PARAM_OPT,0,0},
-		{CMD_PARAM_STR|CMD_PARAM_OPT,0,0}, {0,0,0}},
+		{CMD_PARAM_STR|CMD_PARAM_OPT,0,0},
+		{CMD_PARAM_STR|CMD_PARAM_OPT, bflag_fixup,0}, {0,0,0}},
 		REQUEST_ROUTE|ONREPLY_ROUTE},
 	{"remove_ip_port", (cmd_function)_remove_ip_port, {
 		{CMD_PARAM_STR, 0, 0},
@@ -160,7 +166,7 @@ static const cmd_export_t cmds[] = {
 		ALL_ROUTES},
 	{"lookup", (cmd_function)reg_lookup, {
 		{CMD_PARAM_STR|CMD_PARAM_STATIC, domain_fixup, 0},
-		{CMD_PARAM_STR|CMD_PARAM_OPT,0,0},
+		{CMD_PARAM_STR|CMD_PARAM_OPT, lookup_flags_fixup, lookup_flags_fixup_free},
 		{CMD_PARAM_STR|CMD_PARAM_OPT,0,0}, {0,0,0}},
 		REQUEST_ROUTE|ONREPLY_ROUTE|FAILURE_ROUTE},
 	{"add_sock_hdr", (cmd_function)add_sock_hdr, {
@@ -426,6 +432,48 @@ static int domain_fixup(void** param)
 }
 
 
+static int bflag_fixup(void** param)
+{
+	unsigned int mask;
+
+	if ((mask=fixup_flag( FLAG_TYPE_BRANCH, (str*)*param))==NAMED_FLAG_ERROR)
+		return E_UNSPEC;
+
+	*param = (void*)(unsigned long)mask;
+
+	return 0;
+}
+
+
+
+static int save_flags_fixup(void **param)
+{
+	struct save_flags default_flags;
+
+	memset(&default_flags, 0, sizeof default_flags);
+	default_flags.cmatch.mode = CT_MATCH_NONE;
+	default_flags.min_expires = min_expires;
+	default_flags.max_expires = max_expires;
+	default_flags.max_contacts = max_contacts;
+
+	return reg_fixup_save_flags(param, &default_flags);
+}
+
+static int save_flags_fixup_free(void **param)
+{
+	return reg_fixup_free_save_flags(param);
+}
+
+static int lookup_flags_fixup(void **param)
+{
+	return reg_fixup_lookup_flags(param);
+}
+
+static int lookup_flags_fixup_free(void **param)
+{
+	return reg_fixup_free_lookup_flags(param);
+}
+
 static void mod_destroy(void)
 {
 	free_contact_buf();
@@ -438,7 +486,7 @@ static void mod_destroy(void)
 
 static int add_sock_hdr(struct sip_msg* msg, str *hdr_name)
 {
-	struct socket_info* si;
+	const struct socket_info* si;
 	struct lump* anchor;
 	str hdr;
 	char *p;

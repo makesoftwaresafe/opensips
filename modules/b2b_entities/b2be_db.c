@@ -228,7 +228,8 @@ static int b2be_cdb_insert(int type, b2b_dlg_t* dlg, int cols_no)
 	if ((rc = b2be_cdbf.map_set(b2be_cdb, cdb_key, cdb_subkey, &cdb_pairs)))
 		LM_ERR("cachedb set failed\n");
 
-	pkg_free(cdb_subkey->s);
+	if (cdb_subkey)
+		pkg_free(cdb_subkey->s);
 	pkg_free(cdb_key->s);
 	cdb_free_entries(&cdb_pairs, NULL);
 
@@ -258,12 +259,7 @@ int b2be_db_insert(b2b_dlg_t* dlg, int type)
 		qvals[11].val.str_val.s = 0;
 		qvals[11].val.str_val.len = 0;
 	}
-	if (!str_check_token(&dlg->logic_key)) {
-		qvals[12].val.str_val.s = NULL;
-		qvals[12].val.str_val.len = 0;
-	} else {
-		qvals[12].val.str_val = dlg->logic_key;
-	}
+	qvals[12].val.str_val = dlg->logic_key;
 	qvals[13].val.str_val= dlg->mod_name;
 
 	if (!dlg->storage.len) {
@@ -327,21 +323,16 @@ static void b2b_entity_cdb_delete(int type, b2b_dlg_t* dlg)
 		return;
 	}
 
-	if (!str_check_token(&dlg->logic_key)) {
-		cdb_subkey = NULL;
-	} else {
-		cdb_subkey = get_b2be_map_subkey(&dlg->logic_key);
-		if (!cdb_subkey) {
-			LM_ERR("Failed to build map key\n");
-			return;
-		}
+	cdb_subkey = get_b2be_map_subkey(&dlg->logic_key);
+	if (!cdb_subkey) {
+		LM_ERR("Failed to build map key\n");
+		return;
 	}
 
 	if (b2be_cdbf.map_remove(b2be_cdb, cdb_key, cdb_subkey) < 0)
 		LM_ERR("Failed to delete from cachedb\n");
 
-	if (cdb_subkey)
-		pkg_free(cdb_subkey->s);
+	pkg_free(cdb_subkey->s);
 	pkg_free(cdb_key->s);
 }
 
@@ -503,12 +494,7 @@ void store_b2b_dlg(b2b_table htable, unsigned int hsize, int type, int no_lock)
 					qvals[11].val.str_val.s = 0;
 					qvals[11].val.str_val.len = 0;
 				}
-				if (!str_check_token(&dlg->logic_key)) {
-					qvals[12].val.str_val.s = NULL;
-					qvals[12].val.str_val.len = 0;
-				} else {
-					qvals[12].val.str_val = dlg->logic_key;
-				}
+				qvals[12].val.str_val = dlg->logic_key;
 				qvals[13].val.str_val= dlg->mod_name;
 			}
 
@@ -604,7 +590,6 @@ static int load_entity(int_str_t *vals)
 	int port, proto;
 	b2b_table htable;
 	int type;
-	uint64_t ts = 0;
 
 	memset(&dlg, 0, sizeof(b2b_dlg_t));
 
@@ -614,8 +599,9 @@ static int load_entity(int_str_t *vals)
 
 	if(type == B2B_SERVER)/* extract hash and local index */
 	{
+		b2b_key = &vals[2].s;
 		htable = server_htable;
-		if(b2b_parse_key(&dlg.tag[1], &hash_index, &local_index, &ts) < 0)
+		if(b2b_parse_key(&dlg.tag[1], &hash_index, &local_index) < 0)
 		{
 			LM_ERR("Wrong format for b2b key [%.*s]\n", dlg.tag[1].len, dlg.tag[1].s);
 			return -1;
@@ -631,9 +617,10 @@ static int load_entity(int_str_t *vals)
 	}
 	else
 	{
+		b2b_key = &vals[3].s;
 		htable = client_htable;
 
-		if(b2b_parse_key(&dlg.callid, &hash_index, &local_index, NULL) < 0)
+		if(b2b_parse_key(&dlg.callid, &hash_index, &local_index) < 0)
 		{
 			LM_ERR("Wrong format for b2b key [%.*s]\n", dlg.callid.len, dlg.callid.s);
 			return -1;
@@ -687,13 +674,11 @@ static int load_entity(int_str_t *vals)
 		LM_ERR("Failed to create new dialog structure\n");
 		return -1;
 	}
-	b2b_key= b2b_htable_insert(htable,shm_dlg,hash_index, ts, type, 1, 0, 0);
-	if(b2b_key == NULL)
+	if (!b2b_htable_insert(htable,shm_dlg,hash_index, b2b_key, type, 1, 0, 0))
 	{
 		LM_ERR("Failed to insert new record\n");
 		return -1;
 	}
-	pkg_free(b2b_key);
 
 	if (vals[14].s.len) {
 		if (shm_str_dup(&shm_dlg->storage, &vals[14].s) < 0) {

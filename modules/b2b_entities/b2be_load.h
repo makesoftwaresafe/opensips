@@ -55,7 +55,7 @@
 #define B2B_NOTIFY_FL_TERM_BYE   (1<<2)
 
 #define B2B_MAX_PREFIX_LEN    5
-#define B2B_MAX_KEY_SIZE	(B2B_MAX_PREFIX_LEN+4+10+10+INT2STR_MAX_LEN)
+#define B2B_MAX_KEY_SIZE	(B2B_MAX_PREFIX_LEN+5+10+10+INT2STR_MAX_LEN+10)
 
 enum b2b_entity_type {B2B_SERVER=0, B2B_CLIENT, B2B_NONE};
 
@@ -75,7 +75,8 @@ typedef struct client_info
 	str local_contact;
 	unsigned int cseq;
 	unsigned int maxfwd;
-	struct socket_info* send_sock;
+	const struct socket_info* send_sock;
+	const struct socket_info* pref_sock;
 	struct usr_avp *avps;
 }client_info_t;
 
@@ -108,6 +109,7 @@ typedef struct b2b_rpl_data
 	str* text;
 	str* body;
 	str* extra_headers;
+	str* contact;
 	b2b_dlginfo_t* dlginfo;
 }b2b_rpl_data_t;
 
@@ -216,12 +218,12 @@ static inline b2b_dlginfo_t *b2b_new_dlginfo(str *callid, str *fromtag, str *tot
 	dlg->callid.s = (char *)(dlg + 1);
 	dlg->callid.len = callid->len;
 	memcpy(dlg->callid.s, callid->s, callid->len);
-	if (totag->s) {
+	if (totag && totag->s) {
 		dlg->totag.len = totag->len;
 		dlg->totag.s = dlg->callid.s + dlg->callid.len;
 		memcpy(dlg->totag.s, totag->s, totag->len);
 	}
-	if (fromtag->s) {
+	if (fromtag && fromtag->s) {
 		dlg->fromtag.len = fromtag->len;
 		dlg->fromtag.s = dlg->callid.s + dlg->callid.len + dlg->totag.len;
 		memcpy(dlg->fromtag.s, fromtag->s, fromtag->len);

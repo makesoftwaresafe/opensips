@@ -69,7 +69,9 @@ dlg_t * build_dlg_t(struct dlg_cell * cell, int dst_leg, int src_leg)
 	if (cell->legs[dst_leg].last_gen_cseq != 0)
 	{
 		/* OPTIONS pings sent, use new cseq */
+		LM_DBG("last_gen_cseq is [%d]\n", cell->legs[dst_leg].last_gen_cseq);
 		td->loc_seq.value = ++(cell->legs[dst_leg].last_gen_cseq);
+		LM_DBG("incrementing last_gen_cseq to [%d]\n", td->loc_seq.value);
 		td->loc_seq.is_set=1;
 		dlg_unlock_dlg(cell);
 		goto after_strcseq;
@@ -153,8 +155,13 @@ dlg_t * build_dialog_info(struct dlg_cell * cell, int dst_leg, int src_leg,
 		}
 
 		cell->legs[dst_leg].last_gen_cseq = loc_seq+1;
-	} else if (inc_cseq)
+		LM_DBG("incrementing last_gen_cseq to [%d] from loc_seq\n",
+			cell->legs[dst_leg].last_gen_cseq);
+	} else if (inc_cseq) {
 		cell->legs[dst_leg].last_gen_cseq++;
+		LM_DBG("incrementing last_gen_cseq to [%d]\n",
+			cell->legs[dst_leg].last_gen_cseq);
+	}
 
 	if (reply_marker)
 		*reply_marker = DLG_PING_PENDING;
@@ -219,8 +226,8 @@ static void dual_bye_event(struct dlg_cell* dlg, struct sip_msg *req,
 		LM_DBG("removing dialog with h_entry %u and h_id %u\n",
 			dlg->h_entry, dlg->h_id);
 
-		if (dlg->rt_on_hangup)
-			run_dlg_script_route( dlg, dlg->rt_on_hangup);
+		if (ref_script_route_check_and_update(dlg->rt_on_hangup))
+			run_dlg_script_route( dlg, dlg->rt_on_hangup->idx);
 
 		/*destroy linkers */
 		destroy_linkers(dlg);
@@ -252,7 +259,7 @@ static void dual_bye_event(struct dlg_cell* dlg, struct sip_msg *req,
 			if (push_new_processing_context( dlg, &old_ctx, &new_ctx, &fake_msg)==0) {
 				/* dialog terminated (BYE) */
 				run_dlg_callbacks( DLGCB_TERMINATED, dlg, fake_msg,
-					DLG_DIR_NONE, NULL, 0, is_active);
+					DLG_DIR_NONE, -1, NULL, 0, is_active);
 				/* reset the processing context */
 				if (current_processing_ctx == NULL)
 					*new_ctx = NULL;
@@ -265,7 +272,7 @@ static void dual_bye_event(struct dlg_cell* dlg, struct sip_msg *req,
 			/* we should have the msg and context from upper levels */
 			/* dialog terminated (BYE) */
 			run_dlg_callbacks( DLGCB_TERMINATED, dlg, req,
-				DLG_DIR_NONE, NULL, 0, is_active);
+				DLG_DIR_NONE, -1, NULL, 0, is_active);
 		}
 
 		LM_DBG("first final reply\n");
@@ -615,6 +622,8 @@ int send_leg_msg(struct dlg_cell *dlg,str *method,int src_leg,int dst_leg,
 	if (push_new_processing_context( dlg, &old_ctx, &new_ctx, NULL)!=0)
 		return -1;
 
+	ctx_lastdstleg_set(dst_leg);
+
 	dialog_info->T_flags=T_NO_AUTOACK_FLAG;
 
 	result = d_tmb.t_request_within
@@ -789,7 +798,7 @@ error:
 }
 
 static mi_response_t *mi_send_sequential(struct dlg_cell *dlg, int sleg,
-		str *method, str *body, str *ct, int challenge, struct mi_handler *async_hdl)
+		str *method, str *body, str *headers, str *ct, int challenge, struct mi_handler *async_hdl)
 {
 	struct dlg_sequential_param *param;
 	int dleg = other_leg(dlg, sleg);
@@ -810,7 +819,7 @@ static mi_response_t *mi_send_sequential(struct dlg_cell *dlg, int sleg,
 	param->method.s = (char *)(param + 1);
 	memcpy(param->method.s, method->s, method->len);
 
-	if (!dlg_get_leg_hdrs(dlg, sleg, dleg, ct, NULL, &extra_headers)) {
+	if (!dlg_get_leg_hdrs(dlg, sleg, dleg, ct, headers, &extra_headers)) {
 		LM_ERR("No more pkg for extra headers \n");
 		shm_free(param);
 		return init_mi_error(500, MI_SSTR("Internal Error"));
@@ -946,6 +955,7 @@ mi_response_t *mi_send_sequential_dlg(const mi_params_t *params,
 	str callid;
 	str body;
 	str ct;
+	str headers;
 	int leg, challenge, body_mode;
 
 	if (get_mi_string_param(params, "callid", &callid.s, &callid.len) < 0)
@@ -957,6 +967,11 @@ mi_response_t *mi_send_sequential_dlg(const mi_params_t *params,
 	if (try_get_mi_string_param(params, "method", &method.s, &method.len) < 0) {
 		method.s = "INVITE";
 		method.len = 6;
+	}
+
+	if (try_get_mi_string_param(params, "headers", &headers.s, &headers.len) < 0) {
+		headers.s = "";
+		headers.len = 0;
 	}
 
 	if ((body_mode = mi_parse_body_mode(params, &ct, &body)) < 0)
@@ -991,7 +1006,7 @@ mi_response_t *mi_send_sequential_dlg(const mi_params_t *params,
 		content = NULL;
 
 	return mi_send_sequential(dlg, leg, &method,
-			(body_mode == 0?NULL:&body), content, challenge, async_hdl);
+			(body_mode == 0?NULL:&body), &headers, content, challenge, async_hdl);
 }
 
 struct dlg_indialog_req_param {
